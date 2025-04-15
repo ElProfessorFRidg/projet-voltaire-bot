@@ -1,0 +1,6 @@
+.env
+node_modules
+.idea
+app.log
+training.html
+package-lock.json
