@@ -40,8 +40,8 @@ Le script suit les étapes suivantes pour interagir avec Projet Voltaire :
 
 1.  **Cloner le dépôt :**
     ```bash
-    git clone <URL_DU_DEPOT>
-    cd projet-voltaire-js-2.0
+    git clone https://github.com/ElProfessorFRidg/projet-voltaire-bot
+    cd projet-voltaire-bot
     ```
 2.  **Installer les dépendances :**
     ```bash
@@ -66,7 +66,7 @@ Le script suit les étapes suivantes pour interagir avec Projet Voltaire :
         VOLTAIRE_USERNAME="votre_email_ou_identifiant"
         VOLTAIRE_PASSWORD="votre_mot_de_passe"
 
-        # Clé API OpenAI (si utilisée)
+        # Clé API OpenAI (obligatoire)
         OPENAI_API_KEY="votre_clé_api_openai"
 
         # Autres configurations (optionnel)
