@@ -1,35 +1,35 @@
 const winston = require('winston');
 
-// Configuration du logger
+// Liste des niveaux de log autorisés (pour robustesse)
+const allowedLevels = Object.keys(winston.config.npm.levels);
+
+/**
+ * Crée et configure un logger Winston pour l'application.
+ * - Console : niveau 'info' et supérieur, format colorisé et lisible.
+ * - Fichier : niveau 'debug' et supérieur, format JSON.
+ */
 const logger = winston.createLogger({
-  levels: winston.config.npm.levels, // Utilise les niveaux standards (error, warn, info, http, verbose, debug, silly)
+  levels: winston.config.npm.levels,
   format: winston.format.combine(
     winston.format.timestamp({ format: 'YYYY-MM-DD HH:mm:ss' })
-    // On pourrait ajouter d'autres formats globaux ici si nécessaire
   ),
   transports: [
-    // Transport pour la console
     new winston.transports.Console({
-      level: 'info', // Affiche info, warn, error dans la console
+      level: allowedLevels.includes('info') ? 'info' : allowedLevels[0],
       format: winston.format.combine(
-        winston.format.colorize(), // Ajoute des couleurs
-        winston.format.printf(info => `${info.timestamp} ${info.level}: ${info.message}`) // Format personnalisé
+        winston.format.colorize(),
+        winston.format.printf(
+          info => `${info.timestamp} ${info.level}: ${info.message}`
+        )
       )
     }),
-    // Transport pour le fichier
     new winston.transports.File({
-      level: 'debug', // Enregistre tout à partir de debug dans le fichier
-      filename: 'app.log', // Nom du fichier log (sera à la racine du projet)
-      format: winston.format.combine(
-        // Pas de colorize pour le fichier
-        winston.format.json() // Enregistre les logs en format JSON
-        // Alternative : format texte simple pour le fichier
-        // winston.format.printf(info => `${info.timestamp} ${info.level}: ${info.message}`)
-      )
+      level: allowedLevels.includes('debug') ? 'debug' : allowedLevels[0],
+      filename: 'app.log',
+      format: winston.format.json()
     })
   ],
-  exitOnError: false // Ne pas quitter l'application en cas d'erreur de logging
+  exitOnError: false
 });
 
-// Exporte l'instance configurée
 module.exports = logger;
