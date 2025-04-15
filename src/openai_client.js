@@ -56,18 +56,22 @@ async function getCorrection(promptContent) {
 
   const systemMessage =
     "Tu es un expert en grammaire et orthographe française, assistant pour le Projet Voltaire. " +
-    "Analyse la phrase ou la question fournie et retourne la correction ou la réponse sous forme d'objet JSON structuré. " +
+    "Analyse la phrase ou la question fournie et retourne la correction ou la réponse sous forme d'objet JSON structuré." +
     'Par exemple: { "action": "click_word", "value": "erreur" } ou { "action": "select_option", "value": "Option B" } ' +
     'ou { "action": "validate_rule", "rule_id": "REGLE_123" }. Ne fournis que le JSON.';
 
   logger.debug(`Envoi du prompt à OpenAI (${OPENAI_MODEL}): ${promptContent}`);
 
+  // Choix aléatoire du modèle : 50% de chance d'utiliser le modèle configuré, sinon gpt-4.1-mini
+  const randomModel = Math.random() < 0.6 ? OPENAI_MODEL : 'gpt-4.1-mini';
+  logger.debug(`Modèle utilisé pour cette requête : ${randomModel}`);
+
   try {
     const completion = await openai.chat.completions.create({
-      model: OPENAI_MODEL,
+      model: randomModel,
       messages: [
         { role: "system", content: systemMessage },
-        { role: "user", content: promptContent }
+        { role: "user", content: `${promptContent}` }
       ],
       temperature: 0.2,
       max_tokens: 2048,

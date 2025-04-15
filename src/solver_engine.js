@@ -168,17 +168,32 @@ async function solveSingleExercise(page) {
         }
         logger.info(`[SIMULATION] Fin de l'application de l'action: ${action}`);
 
-        // 5. Cliquer sur "Suivant"
+        // 5. Cliquer sur "Suivant" avec retry
         logger.info('Action appliquée. Tentative de clic sur le bouton "Suivant".');
-        try {
-            await randomDelay(3000, 5000);
+        let attempt = 0;
+        let clicked = false;
+        while (attempt < 5 && !clicked) {
+            await randomDelay(3000, 3000); // 3 secondes d'attente
             const nextButtonLocator = page.locator('#btn_question_suivante.nextButton');
-            await nextButtonLocator.click({ timeout: 5000 });
-            logger.info('Clic sur le bouton "Suivant" réussi.');
-            await page.waitForTimeout(500);
-        } catch (nextButtonError) {
-            logger.info(`Le bouton "Suivant" n'est pas cliquable (message: ${nextButtonError.message}). On considère l'exercice comme terminé.`);
-            return { success: true, exerciseComplete: true };
+            const isVisible = await nextButtonLocator.isVisible();
+            const isEnabled = await nextButtonLocator.isEnabled();
+            if (isVisible && isEnabled) {
+                try {
+                    await nextButtonLocator.click({ timeout: 5000 });
+                    logger.info('Clic sur le bouton "Suivant" réussi.');
+                    await page.waitForTimeout(500);
+                    clicked = true;
+                } catch (nextButtonError) {
+                    logger.info(`Tentative ${attempt + 1}: Le bouton "Suivant" est visible/activé mais le clic a échoué (${nextButtonError.message}).`);
+                }
+            } else {
+                logger.info(`Tentative ${attempt + 1}: Le bouton "Suivant" n'est pas visible ou activé.`);
+            }
+            attempt++;
+        }
+        if (!clicked) {
+            logger.error('Le bouton "Suivant" n\'a pas pu être cliqué après 5 tentatives. Demande de redémarrage du navigateur.');
+            return { success: false, restartBrowser: true };
         }
 
         logger.info('Fin de la tentative de résolution de l\'exercice.');
