@@ -1,47 +1,47 @@
 // src/browser_manager.js
 
-// 1. Importation
 const playwright = require('playwright');
 
-// 3. Fonction d'Initialisation
 /**
  * Initialise une instance de navigateur Playwright, un contexte et une page.
  * @param {object} options - Options de lancement pour Playwright (ex: { headless: false }).
- * @returns {Promise<{browser: import('playwright').Browser, page: import('playwright').Page}>} Un objet contenant l'instance du navigateur et la page.
+ * @returns {Promise<{browser: import('playwright').Browser, page: import('playwright').Page}>}
  */
 async function initializeBrowser(options = {}) {
-    // Lance le navigateur (Chromium par défaut) avec les options fournies
-    const browser = await playwright.chromium.launch(options);
-    // Crée un nouveau contexte
-    const context = await browser.newContext();
-    // Crée une nouvelle page
-    const page = await context.newPage();
-    // Retourne le navigateur et la page
-    return { browser, page };
+    let browser;
+    try {
+        browser = await playwright.chromium.launch(options);
+        if (!browser) throw new Error('Échec du lancement du navigateur Chromium.');
+        const context = await browser.newContext();
+        if (!context) throw new Error('Échec de la création du contexte navigateur.');
+        const page = await context.newPage();
+        if (!page) throw new Error('Échec de la création de la page.');
+        return { browser, page };
+    } catch (error) {
+        if (browser) {
+            await closeBrowser(browser);
+        }
+        throw new Error(`Erreur lors de l'initialisation du navigateur: ${error.message}`);
+    }
 }
 
-// 4. Fonction de Fermeture
 /**
  * Ferme proprement l'instance du navigateur Playwright.
  * @param {import('playwright').Browser} browser - L'instance du navigateur à fermer.
  */
 async function closeBrowser(browser) {
-    // Vérifie si l'objet browser est valide
-    if (browser && typeof browser.close === 'function') {
-        try {
-            // Ferme le navigateur
-            await browser.close();
-            // console.log("Navigateur fermé avec succès."); // Log de confirmation (optionnel)
-        } catch (error) {
-            // Gestion d'erreur basique
-            console.error("Erreur lors de la fermeture du navigateur:", error);
-        }
-    } else {
-        // console.warn("Tentative de fermeture d'un navigateur invalide ou déjà fermé."); // Avertissement (optionnel)
+    if (!browser || typeof browser.close !== 'function') {
+        // Navigateur invalide ou déjà fermé
+        return;
+    }
+    try {
+        await browser.close();
+    } catch (error) {
+        // Affiche l'erreur mais ne la propage pas pour éviter de casser la chaîne d'exécution
+        console.error("Erreur lors de la fermeture du navigateur:", error);
     }
 }
 
-// 5. Exportation
 module.exports = {
     initializeBrowser,
     closeBrowser
