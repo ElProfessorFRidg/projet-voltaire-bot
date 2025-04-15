@@ -28,6 +28,11 @@ async function clickWord(page, word) {
     }
 
     if (found) {
+        if (Math.random() < 0.1) {
+            await randomDelay(10000, 18000);
+        } else {
+            await randomDelay(3000, 8000);
+        }
         await locator.first().click({ timeout: 5000 });
         logger.info(`Clic réussi sur le mot ou sa première partie`);
         return true;
@@ -41,6 +46,7 @@ async function clickWord(page, word) {
 async function clickButton(page, selector, description) {
     try {
         const button = page.locator(selector);
+        await randomDelay(3000, 5000);
         await button.click({ timeout: 5000 });
         logger.info(`Clic réussi sur le bouton "${description}".`);
         return true;
@@ -106,6 +112,7 @@ async function solveSingleExercise(page) {
                     logger.warn(`Action 'click_word' reçue sans 'value'.`);
                     return { success: false, error: 'AI action "click_word" missing value' };
                 }
+                await randomDelay(3000, 5000);
                 logger.info(`Tentative de clic sur le mot: "${correctionData.value}"`);
                 try {
                     actionSuccess = await clickWord(page, correctionData.value);
@@ -164,6 +171,7 @@ async function solveSingleExercise(page) {
         // 5. Cliquer sur "Suivant"
         logger.info('Action appliquée. Tentative de clic sur le bouton "Suivant".');
         try {
+            await randomDelay(3000, 5000);
             const nextButtonLocator = page.locator('#btn_question_suivante.nextButton');
             await nextButtonLocator.click({ timeout: 5000 });
             logger.info('Clic sur le bouton "Suivant" réussi.');
