@@ -1,5 +1,14 @@
-// src/config_loader.js
 require('dotenv').config(); // Charge les variables d'environnement depuis le fichier .env
+
+// Valeurs par défaut pour la configuration
+const DEFAULTS = {
+  OPENAI_MODEL: 'gpt-4o-mini',
+  MIN_ACTION_DELAY: 500,
+  MAX_ACTION_DELAY: 1500,
+  MIN_TYPING_DELAY: 50,
+  MAX_TYPING_DELAY: 150,
+  LOGIN_URL: 'https://compte.groupe-voltaire.fr/login'
+};
 
 /**
  * Vérifie que les variables d'environnement essentielles sont définies.
@@ -9,41 +18,58 @@ function validateEnvVariables() {
   const requiredEnvVars = [
     'VOLTAIRE_EMAIL',
     'VOLTAIRE_PASSWORD',
-    'OPENAI_API_KEY',
-    // Note: Les variables de délai ont des valeurs par défaut dans .env.example,
-    // mais pourraient être rendues obligatoires ici si nécessaire.
+    'OPENAI_API_KEY'
   ];
 
-  const missingVars = requiredEnvVars.filter(varName => !process.env[varName]);
+  const missingVars = requiredEnvVars.filter(
+    varName => typeof process.env[varName] !== 'string' || process.env[varName].trim() === ''
+  );
 
   if (missingVars.length > 0) {
-    throw new Error(`Erreur de configuration : Les variables d'environnement suivantes sont manquantes dans le fichier .env : ${missingVars.join(', ')}`);
+    throw new Error(
+      `Erreur de configuration : Les variables d'environnement suivantes sont manquantes ou vides dans le fichier .env : ${missingVars.join(', ')}`
+    );
   }
 }
 
-// Exécute la validation au chargement du module
-validateEnvVariables();
+/**
+ * Parse une valeur en entier, retourne la valeur par défaut si le parsing échoue.
+ * @param {string|undefined} value
+ * @param {number} defaultValue
+ * @returns {number}
+ */
+function parseIntOrDefault(value, defaultValue) {
+  const parsed = parseInt(value, 10);
+  return Number.isFinite(parsed) ? parsed : defaultValue;
+}
 
-// Exporte un objet contenant la configuration validée et traitée.
-// Exporter la configuration chargée et validée
+// Exécute la validation au chargement du module
+try {
+  validateEnvVariables();
+} catch (err) {
+  // Affiche l'erreur et termine le processus proprement
+  console.error(err.message);
+  process.exit(1);
+}
+
+// Prépare la configuration validée et traitée
 const config = {
   VOLTAIRE_EMAIL: process.env.VOLTAIRE_EMAIL,
   VOLTAIRE_PASSWORD: process.env.VOLTAIRE_PASSWORD,
   OPENAI_API_KEY: process.env.OPENAI_API_KEY,
-  // Utilise une valeur par défaut pour le modèle s'il n'est pas défini
-  OPENAI_MODEL: process.env.OPENAI_MODEL || 'gpt-4o-mini',
-  // Parse les délais en entiers, avec des valeurs par défaut raisonnables
-  MIN_ACTION_DELAY: parseInt(process.env.MIN_ACTION_DELAY || '500', 10),
-  MAX_ACTION_DELAY: parseInt(process.env.MAX_ACTION_DELAY || '1500', 10),
-  MIN_TYPING_DELAY: parseInt(process.env.MIN_TYPING_DELAY || '50', 10),
-  MAX_TYPING_DELAY: parseInt(process.env.MAX_TYPING_DELAY || '150', 10),
-  // Ajoute d'autres variables si nécessaire (ex: LOGIN_URL)
-  LOGIN_URL: process.env.VOLTAIRE_LOGIN_URL || 'https://compte.groupe-voltaire.fr/login'
+  OPENAI_MODEL: process.env.OPENAI_MODEL && process.env.OPENAI_MODEL.trim() !== ''
+    ? process.env.OPENAI_MODEL
+    : DEFAULTS.OPENAI_MODEL,
+  MIN_ACTION_DELAY: parseIntOrDefault(process.env.MIN_ACTION_DELAY, DEFAULTS.MIN_ACTION_DELAY),
+  MAX_ACTION_DELAY: parseIntOrDefault(process.env.MAX_ACTION_DELAY, DEFAULTS.MAX_ACTION_DELAY),
+  MIN_TYPING_DELAY: parseIntOrDefault(process.env.MIN_TYPING_DELAY, DEFAULTS.MIN_TYPING_DELAY),
+  MAX_TYPING_DELAY: parseIntOrDefault(process.env.MAX_TYPING_DELAY, DEFAULTS.MAX_TYPING_DELAY),
+  LOGIN_URL: process.env.VOLTAIRE_LOGIN_URL && process.env.VOLTAIRE_LOGIN_URL.trim() !== ''
+    ? process.env.VOLTAIRE_LOGIN_URL
+    : DEFAULTS.LOGIN_URL
 };
 
 console.log('Configuration chargée et validée.');
-console.log(`Utilisation du modèle OpenAI : ${config.OPENAI_MODEL}`); // Log du modèle utilisé
+console.log(`Utilisation du modèle OpenAI : ${config.OPENAI_MODEL}`);
 
 module.exports = config;
-
-// Suppression de l'ancienne section commentée sur getConfig
