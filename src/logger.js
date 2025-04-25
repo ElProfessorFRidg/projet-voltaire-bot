@@ -1,4 +1,4 @@
-const winston = require('winston');
+import winston from 'winston';
 
 // Liste des niveaux de log autorisés (pour robustesse)
 const allowedLevels = Object.keys(winston.config.npm.levels);
@@ -32,4 +32,4 @@ const logger = winston.createLogger({
   exitOnError: false
 });
 
-module.exports = logger;
+export default logger;
