@@ -4,3 +4,8 @@ node_modules
 app.log
 training.html
 package-lock.json
+user_profiles
+accounts_config.json
+active_accounts.json
+session_times.json
+
