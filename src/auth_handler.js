@@ -1,23 +1,18 @@
 // src/auth_handler.js
-const config = require('../src/config_loader.js');
-const { randomDelay, getRandomInt } = require('../src/human_simulator');
-const logger = require('./logger');
+import { config } from '../src/config_loader.js';
+const { MIN_ACTION_DELAY, MAX_ACTION_DELAY, MIN_TYPING_DELAY, MAX_TYPING_DELAY, LOGIN_URL } = config;
+import { randomDelay, getRandomInt } from '../src/human_simulator.js';
+import logger from './logger.js';
 
 /**
- * Gère la connexion au Projet Voltaire en simulant un comportement humain.
+ * Gère la connexion au Projet Voltaire en simulant un comportement humain pour un compte spécifique.
  * @param {import('playwright').Page} page - L'instance de la page Playwright.
+ * @param {string} email - L'email du compte à utiliser.
+ * @param {string} password - Le mot de passe du compte à utiliser.
  * @returns {Promise<{success: boolean, error?: string}>}
  */
-async function login(page) {
-  const {
-    VOLTAIRE_EMAIL,
-    VOLTAIRE_PASSWORD,
-    MIN_ACTION_DELAY,
-    MAX_ACTION_DELAY,
-    MIN_TYPING_DELAY,
-    MAX_TYPING_DELAY,
-    LOGIN_URL
-  } = config;
+export async function login(page, email, password) {
+  // Les identifiants sont maintenant passés en arguments
 
   // Sélecteurs pour les champs du formulaire de connexion
   const emailSelector = 'input[name="email"], input#user_pseudonym';
@@ -32,6 +27,17 @@ async function login(page) {
     // Navigation vers la page de connexion
     await page.goto(LOGIN_URL, { waitUntil: 'networkidle' });
     logger.info('Page de connexion chargée.');
+    // Vérification si la session est déjà authentifiée
+    try {
+      const isAuthenticated = await page.locator(successSelector).isVisible({ timeout: 5000 }); // Court timeout
+      if (isAuthenticated) {
+        logger.info('Session déjà authentifiée. Saut de la procédure de connexion.');
+        return { success: true };
+      }
+    } catch (checkError) {
+      // Si la vérification échoue (ex: timeout), on continue la procédure de connexion normale
+      logger.debug('Vérification d\'authentification échouée ou timeout. Poursuite de la connexion normale.');
+    }
 
     // Saisie de l'email
     await randomDelay(MIN_ACTION_DELAY, MAX_ACTION_DELAY);
@@ -39,8 +45,8 @@ async function login(page) {
     const emailField = page.locator(emailSelector);
     await emailField.waitFor({ state: 'visible', timeout: 10000 });
     logger.debug('Saisie de l\'email...');
-    await emailField.type(VOLTAIRE_EMAIL, { delay: getRandomInt(MIN_TYPING_DELAY, MAX_TYPING_DELAY) });
-    logger.info('Email saisi.');
+    await emailField.type(email, { delay: getRandomInt(MIN_TYPING_DELAY, MAX_TYPING_DELAY) });
+    logger.info(`Email saisi pour ${email}.`); // Log l'email utilisé
 
     // Saisie du mot de passe
     await randomDelay(MIN_ACTION_DELAY, MAX_ACTION_DELAY);
@@ -48,8 +54,8 @@ async function login(page) {
     const passwordField = page.locator(passwordSelector);
     await passwordField.waitFor({ state: 'visible', timeout: 10000 });
     logger.debug('Saisie du mot de passe...');
-    await passwordField.type(VOLTAIRE_PASSWORD, { delay: getRandomInt(MIN_TYPING_DELAY, MAX_TYPING_DELAY) });
-    logger.info('Mot de passe saisi.');
+    await passwordField.type(password, { delay: getRandomInt(MIN_TYPING_DELAY, MAX_TYPING_DELAY) });
+    logger.info('Mot de passe saisi.'); // Ne pas logger le mot de passe
 
     // Soumission du formulaire
     await randomDelay(MIN_ACTION_DELAY, MAX_ACTION_DELAY);
@@ -107,5 +113,3 @@ async function login(page) {
     return { success: false, error: `Critical login error: ${error.message}` };
   }
 }
-
-module.exports = { login };
