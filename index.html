@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gestion des Comptes Utilisateurs</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<!-- Notifications toast -->
+<div id="notification-container"></div>
+    <h1>Gestion des Comptes Utilisateurs</h1>
+
+    <div class="container">
+        <div class="account-list-panel">
+            <h2>Comptes Disponibles</h2>
+            <ul id="account-list">
+                <!-- Les comptes seront chargés ici par JavaScript -->
+            </ul>
+            <button id="add-account-btn">Ajouter un Compte</button>
+        </div>
+
+        <div class="account-config-panel">
+            <h2>Configuration du Compte</h2>
+            <div id="config-form">
+                <!-- Le formulaire de configuration sera chargé ici par JavaScript -->
+                <p>Sélectionnez un compte pour afficher sa configuration.</p>
+            </div>
+        </div>
+
+        <div class="bot-config-panel">
+            <h2>Configuration Générale du Bot</h2>
+            <div id="bot-config-form">
+                <!-- Le formulaire de configuration générale sera chargé ici par JavaScript -->
+                <p>Chargement de la configuration...</p>
+            </div>
+        </div>
+    </div>
+
+<!-- Modal/Formulaire pour ajout/modification de compte -->
+    <script src="script.js"></script>
+<!-- Bouton switch mode sombre/clair -->
+<button id="theme-toggle-btn" title="Basculer mode sombre/clair" aria-label="Basculer mode sombre/clair">🌙</button>
+</body>
+</html>
