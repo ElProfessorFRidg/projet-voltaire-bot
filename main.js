@@ -1,203 +1,518 @@
 // 1. Importations
 import logger from './src/logger.js';
-import { initializeBrowser, closeBrowser } from './src/browser_manager.js';
+import { initializeBrowserSession, closeBrowserSession, closeAllBrowserSessions, getActiveSessionIds } from './src/browser_manager.js';
 import { login } from './src/auth_handler.js';
 import { solveSingleExercise } from './src/solver_engine.js';
 import { solvePopup } from './src/popup_solver.js';
-import config from './src/config_loader.js';
-import { spawn } from 'child_process';
+import { config, loadAccountsFromJSON } from './src/config_loader.js'; // Importe la config et loadAccountsFromJSON
+import { startServer } from './src/server.js'; // Importe la fonction de démarrage du serveur
+import fs from 'fs/promises'; // Pour lire le fichier des comptes actifs
+import path from 'path'; // Pour gérer les chemins
+// import { spawn } from 'child_process'; // Désactivé car non utilisé pour le redémarrage
+
+// Si Node < 18, décommenter la ligne suivante et installer node-fetch
+// import fetch from 'node-fetch';
+// --- Initialisation universelle de fetch pour Node.js ---
+let fetchRef = globalThis.fetch;
+if (!fetchRef) {
+    // Node < 18 : import dynamique de node-fetch
+    import('node-fetch').then(mod => {
+        fetchRef = mod.default;
+        globalThis.fetch = fetchRef;
+    }).catch(err => {
+        console.error('Impossible de charger node-fetch. Installez-le avec "npm install node-fetch".', err);
+        process.exit(1);
+    });
+} else {
+    globalThis.fetch = fetchRef;
+}
+
+// --- État Global ---
+/** Stocke les IDs des sessions dont le minuteur a expiré */
+const expiredAccounts = new Set();
 
 // --- Fonctions utilitaires internes ---
+
+/**
+ * Convertit une chaîne de durée (ex: "2.5h") en millisecondes.
+ * @param {string | undefined} durationString La chaîne de durée.
+ * @returns {number | null} La durée en millisecondes, ou null si invalide.
+ */
+function parseDurationToMs(durationString) {
+    if (!durationString || typeof durationString !== 'string') {
+        return null;
+    }
+    const match = durationString.trim().match(/^(\d+(\.\d+)?)\s*h$/i); // Accepte Nombreh ou Nombre.Decimaleh
+    if (match && match[1]) {
+        const hours = parseFloat(match[1]);
+        if (Number.isFinite(hours) && hours > 0) {
+            return hours * 60 * 60 * 1000; // Convertit les heures en millisecondes
+        }
+    }
+    logger.warn(`Format de durée invalide : "${durationString}". Attendu : "Nombreh" (ex: "1.5h").`);
+    return null;
+}
+
+
 /**
  * Vérifie la présence du popup d'entraînement intensif et le résout si présent.
- * @param {import('playwright').Page} page 
- * @param {string} popupSelector 
- * @param {number} timeout 
+ * @param {import('playwright').Page} page
+ * @param {string} popupSelector
+ * @param {number} timeout
+ * @param {string} sessionId Pour le logging
  */
-async function checkAndSolvePopup(page, popupSelector, timeout) {
+async function checkAndSolvePopup(page, popupSelector, timeout, sessionId) {
     try {
         const isPopupVisible = await page.locator(popupSelector).isVisible({ timeout });
         if (isPopupVisible) {
-            logger.info('Popup d\'entraînement intensif détecté. Lancement de solvePopup...');
-            await solvePopup(page);
-            logger.info('solvePopup terminé.');
+            logger.info(`[${sessionId}] Popup d'entraînement intensif détecté. Lancement de solvePopup...`);
+            await solvePopup(page); // solvePopup pourrait aussi avoir besoin du sessionId pour log
+            logger.info(`[${sessionId}] solvePopup terminé.`);
             return true;
         }
     } catch (error) {
-        logger.debug(`Popup non détecté ou timeout (${popupSelector}): ${error.message}`);
+        // Ne log que si ce n'est pas une erreur de timeout standard
+        if (!error.message.includes('Timeout') && !error.message.includes('waiting for selector')) {
+             logger.warn(`[${sessionId}] Erreur inattendue lors de la vérification du popup (${popupSelector}): ${error.message}`);
+        } else {
+             logger.debug(`[${sessionId}] Popup non détecté ou timeout (${popupSelector}).`);
+        }
     }
     return false;
 }
 
 /**
- * Sélectionne et clique sur le prochain exercice disponible basé sur les classes
- * 'readyToRun' ou 'unit orange'.
+ * Sélectionne et clique sur le prochain exercice disponible.
  * @param {import('playwright').Page} page
+ * @param {string} sessionId Pour le logging
  * @returns {Promise<boolean>} true si un exercice a été cliqué, false sinon
  */
-async function selectNextExercise(page) {
-    // Sélecteur simplifié ciblant directement les cellules prêtes ou oranges
-    // Priorise 'readyToRun' puis 'unit orange'
+async function selectNextExercise(page, sessionId) {
     const nextExerciseCellSelector = `
-        .validation-activity-cell.readyToRun, 
-        .activity-selector-cell.readyToRun, 
-        .activity-selector-cell.unit.orange
+        .validation-activity-cell.readyToRun,
+        .activity-selector-cell.readyToRun,
+        .activity-selector-cell.unit.orange,
+        .activity-selector-cell.inProgress, /* Selector for in-progress standard exercises */
+        .validation-activity-cell.inProgress /* Selector for in-progress validation exercises */
     `;
-    // Sélecteur pour les boutons "Lancer" à l'intérieur de la cellule cible
     const launchButtonSelector = 'button.activity-selector-cell-launch-button, button.validation-activity-cell-launch-button';
 
-    logger.info('Recherche du prochain exercice à lancer (readyToRun ou orange)...');
+    logger.info(`[${sessionId}] Recherche du prochain exercice à lancer (Selector: ${nextExerciseCellSelector.replace(/\s+/g, ' ').trim()})...`);
 
     try {
-        // Localiser la première cellule correspondant aux critères
-        const targetCell = page.locator(nextExerciseCellSelector).first();
+        // Find the first VISIBLE element matching the selector
+        logger.debug(`[${sessionId}] Recherche de la première cellule cible VISIBLE...`);
+        const targetCell = page.locator(nextExerciseCellSelector).filter({ has: page.locator(':visible') }).first();
 
-        // Attendre que la cellule soit visible
-        await targetCell.waitFor({ state: 'visible', timeout: 15000 });
-        logger.info('Cellule d\'exercice prête ou orange trouvée et visible.');
+        // Wait for the located visible element (optional, but good practice for stability)
+        logger.debug(`[${sessionId}] Attente de la cellule visible localisée...`);
+        await targetCell.waitFor({ state: 'visible', timeout: 15000 }); // Keep a timeout
 
-        // Localiser le bouton "Lancer" à l'intérieur de cette cellule
+        const cellHTML = await targetCell.innerHTML().catch(() => 'N/A'); // Get HTML for logging
+        logger.info(`[${sessionId}] Cellule d'exercice visible trouvée. HTML (extrait): ${cellHTML.substring(0, 100)}...`);
+
         const launchButton = targetCell.locator(launchButtonSelector);
+        // Reduced timeout for button check as the cell is already confirmed visible
+        const isButtonVisible = await launchButton.isVisible({ timeout: 2000 });
+        logger.debug(`[${sessionId}] Vérification du bouton 'Lancer' (Selector: ${launchButtonSelector}). Visible: ${isButtonVisible}`);
 
-        // Vérifier si le bouton "Lancer" est visible et cliquer dessus en priorité
-        if (await launchButton.isVisible({ timeout: 1000 })) {
-            logger.info('Bouton "Lancer" trouvé dans la cellule. Clic...');
-            await launchButton.click();
+        if (isButtonVisible) {
+            logger.info(`[${sessionId}] Bouton "Lancer" trouvé et visible. Clic sur le bouton...`);
+            await launchButton.click({ timeout: 5000 });
         } else {
-            // Si le bouton n'est pas visible (cas improbable si la cellule est prête),
-            // cliquer sur la cellule elle-même comme fallback.
-            logger.warn('Bouton "Lancer" non visible dans la cellule prête/orange. Tentative de clic sur la cellule principale.');
+            // If the button isn't there or visible quickly, click the cell itself
+            logger.info(`[${sessionId}] Bouton "Lancer" non visible rapidement. Clic sur la cellule principale...`);
             await targetCell.click({ timeout: 5000 });
         }
-
-        logger.info('Clic effectué avec succès sur l\'exercice.');
+        logger.info(`[${sessionId}] Clic effectué sur l'exercice/bouton.`);
         return true;
-
     } catch (error) {
-        // Gérer les erreurs (élément non trouvé, non visible, non cliquable après timeout)
+        // ... existing error handling ...
         if (error.name === 'TimeoutError') {
-            logger.info('Aucune cellule d\'exercice prête ou orange n\'a été trouvée ou n\'est devenue visible dans les délais.');
+            // Log specific timeout details
+            if (error.message.includes('waitFor') || error.message.includes('filter')) { // Updated check
+                 logger.info(`[${sessionId}] Timeout: Aucun exercice VISIBLE correspondant aux sélecteurs n'a été trouvé dans les délais.`);
+            } else if (error.message.includes('click')) {
+                 logger.warn(`[${sessionId}] Timeout lors du clic sur l'élément trouvé. L'élément est peut-être devenu non interactif.`);
+            } else {
+                 logger.warn(`[${sessionId}] TimeoutError lors de la sélection/clic sur l'exercice: ${error.message}`);
+            }
         } else {
-            logger.error(`Erreur lors de la tentative de sélection/clic sur l'exercice: ${error.message}`);
+            logger.error(`[${sessionId}] Erreur inattendue lors de la sélection/clic sur l'exercice: ${error.message}`, error.stack);
         }
+        // ... existing screenshot logic ...
         return false;
     }
 }
 
-// 2. Fonction Principale Asynchrone
-async function runBot() {
-    let browserInstance = null;
-    let restartRequested = false;
-    logger.info('Démarrage du bot Projet Voltaire...');
+// --- Logique spécifique à une session ---
+/**
+ * Gère le cycle de vie d'une session pour un compte donné.
+ * @param {{id: string, email: string, password: string}} account
+ */
+async function runAccountSession(account) {
+    const sessionId = account.id;
+    let sessionData = null;
+    let sessionTimerId = null; // Pour stocker l'ID du timer
+    let sessionTimeIntervalId = null; // Pour l'intervalle d'envoi du temps restant
+    logger.info(`[${sessionId}] Démarrage de la session pour ${account.email}...`);
+
+    // --- Gestion du Minuteur de Session ---
+    const durationMs = parseDurationToMs(account.sessionDuration);
+    if (durationMs !== null) {
+        logger.info(`[${sessionId}] Minuteur de session configuré pour ${account.sessionDuration} (${durationMs}ms).`);
+        sessionTimerId = setTimeout(async () => {
+            logger.debug(`[${sessionId}] Fonction de rappel du minuteur déclenchée.`);
+            // Vérifier si le compte n'est pas déjà marqué comme expiré (évite double exécution)
+            if (expiredAccounts.has(sessionId)) {
+                logger.debug(`[${sessionId}] Minuteur déclenché, mais session déjà marquée comme expirée.`);
+                return;
+            }
+
+            logger.warn(`[${sessionId}] Le temps de session (${account.sessionDuration}) a expiré. Fermeture de la session.`);
+            expiredAccounts.add(sessionId); // Marquer comme expiré
+
+            // Tenter de fermer la session associée
+            // Il est possible que la session soit déjà en cours de fermeture ou fermée par une autre logique
+            try {
+                await closeBrowserSession(sessionId);
+                logger.info(`[${sessionId}] Session fermée avec succès suite à l'expiration du minuteur.`);
+            } catch (closeError) {
+                // Log l'erreur mais ne pas la propager, car l'important est que le compte soit marqué expiré
+                logger.error(`[${sessionId}] Erreur lors de la fermeture de la session après expiration du minuteur: ${closeError.message}`);
+            }
+        }, durationMs);
+    } else if (account.sessionDuration) {
+        // Si une durée était fournie mais invalide
+        logger.warn(`[${sessionId}] Durée de session fournie ("${account.sessionDuration}") invalide. Aucun minuteur démarré.`);
+    } else {
+        logger.info(`[${sessionId}] Aucune durée de session configurée. Session illimitée.`);
+    }
+    // -------------------------------------
+
+    // --- Envoi régulier du temps restant au serveur web ---
+    if (durationMs !== null) {
+        const sessionStart = Date.now();
+        // Fonction pour attendre que fetch soit bien disponible
+        async function waitForFetchAndStartInterval() {
+            let maxTries = 20;
+            while (typeof globalThis.fetch !== 'function' && maxTries-- > 0) {
+                await new Promise(res => setTimeout(res, 100));
+            }
+            if (typeof globalThis.fetch !== 'function') {
+                logger.error(`[${sessionId}] fetch n'est pas disponible après attente. Impossible d'envoyer le temps de session.`);
+                return;
+            }
+            sessionTimeIntervalId = setInterval(async () => {
+                const now = Date.now();
+                const elapsed = now - sessionStart;
+                const timeLeftMs = Math.max(durationMs - elapsed, 0);
+                try {
+                    await fetchRef(`http://localhost:3000/session-update/${encodeURIComponent(sessionId)}`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ timeLeftMs })
+                    });
+                } catch (err) {
+                    logger.warn(`[${sessionId}] Erreur lors de l'envoi du temps de session restant : ${err.message}`);
+                }
+                if (timeLeftMs <= 0) {
+                    clearInterval(sessionTimeIntervalId);
+                }
+            }, 1000);
+        }
+        waitForFetchAndStartInterval();
+    }
+    // ------------------------------------------------------
 
     try {
-        logger.info('Initialisation du navigateur...');
-        const { browser, page } = await initializeBrowser({ headless: false });
-        browserInstance = browser;
-        logger.info('Navigateur initialisé avec succès.');
+        logger.info(`[${sessionId}] Initialisation du navigateur...`);
+        // Utilise les options de config pour headless, etc.
+        sessionData = await initializeBrowserSession(sessionId, { headless: false }); // TODO: Rendre headless configurable
+        const { page } = sessionData;
+        logger.info(`[${sessionId}] Navigateur initialisé.`);
 
-        logger.info('Tentative de connexion...');
-        const loginResult = await login(page);
+        logger.info(`[${sessionId}] Tentative de connexion...`);
+        logger.debug(`[${sessionId}] Appel de login avec email: ${account.email}`);
+        const loginResult = await login(page, account.email, account.password);
+        logger.debug(`[${sessionId}] Retour de login: ${JSON.stringify(loginResult)}`);
 
         if (!loginResult.success) {
-            logger.error(`Échec de la connexion: ${loginResult.message || 'Raison inconnue'}`);
-            throw new Error('Échec de la connexion');
+            logger.error(`[${sessionId}] Échec de la connexion: ${loginResult.error || 'Raison inconnue'}`);
+            throw new Error('Échec de la connexion'); // Arrête cette session
         }
-        logger.info('Connexion réussie.');
+        logger.info(`[${sessionId}] Connexion réussie.`);
+        logger.debug(`[${sessionId}] Connexion réussie. Préparation de la boucle principale.`);
 
         const popupSelector = '.popupContent .intensiveTraining';
         const popupCheckTimeout = 3000;
 
+        // Boucle principale pour CETTE session
+        logger.debug(`[${sessionId}] Entrée dans la boucle principale.`);
         mainLoop: while (true) {
-            logger.info('Début de la boucle principale: Recherche ou attente de l\'exercice...');
+            logger.info(`[${sessionId}] Début de la boucle: Recherche/attente exercice...`);
+            logger.debug(`[${sessionId}] Début de l'itération de la boucle principale.`);
 
-            // Tentative de sélection et clic sur l'exercice à traiter
-            let exerciseSelectedAutomatically = false;
+            // Vérifier si la page/contexte est toujours valide avant chaque action majeure
+             if (!page || page.isClosed()) {
+                logger.error(`[${sessionId}] La page est fermée avant selectNextExercise. Arrêt de la session.`);
+                break mainLoop;
+            }
+
+            // *** NOUVEAU: Attendre que la page soit potentiellement stable ***
             try {
-                exerciseSelectedAutomatically = await selectNextExercise(page);
-                if (exerciseSelectedAutomatically) {
-                    logger.info("Exercice sélectionné et cliqué automatiquement.");
-                    // Attente après le clic automatique
+                logger.debug(`[${sessionId}] Attente de stabilisation de la page (load/domcontentloaded)...`);
+                // Attendre que le réseau soit inactif ou qu'un état de chargement soit atteint
+                // 'load' ou 'domcontentloaded' sont de bons candidats après une navigation ou action majeure.
+                // 'networkidle' peut être trop long ou ne jamais se déclencher sur des pages très dynamiques.
+                await page.waitForLoadState('domcontentloaded', { timeout: 10000 }); // Attente max 10s
+                logger.debug(`[${sessionId}] Stabilisation terminée ou timeout atteint.`);
+            } catch (waitError) {
+                 if (!page || page.isClosed()) {
+                    logger.error(`[${sessionId}] La page est fermée pendant l'attente de stabilisation. Arrêt.`);
+                    break mainLoop;
+                }
+                logger.warn(`[${sessionId}] Timeout ou erreur lors de waitForLoadState: ${waitError.message}. Continuation...`);
+            }
+            // *** FIN NOUVEAU ***
+
+
+            let exerciseSelected = false;
+            try {
+                logger.debug(`[${sessionId}] Appel de selectNextExercise.`);
+                exerciseSelected = await selectNextExercise(page, sessionId); // Existing call
+                logger.debug(`[${sessionId}] Retour de selectNextExercise: ${exerciseSelected}`);
+                if (exerciseSelected) {
+                    logger.info(`[${sessionId}] Exercice sélectionné avec succès.`);
+                    // Short delay after successful selection/click might be needed for UI to update
                     await page.waitForTimeout(config.MIN_ACTION_DELAY + Math.random() * (config.MAX_ACTION_DELAY - config.MIN_ACTION_DELAY));
                 } else {
-                    // Si selectNextExercise retourne false (timeout ou autre erreur interne gérée)
-                    logger.info("Aucun exercice n'a pu être sélectionné automatiquement. Poursuite en supposant une action manuelle ou que l'exercice est déjà en cours...");
-                    // On ne quitte PAS la boucle ici, on continue comme si l'utilisateur pouvait cliquer.
-                    await page.waitForTimeout(1000); // Petite pause
+                    logger.info(`[${sessionId}] Aucun exercice n'a pu être sélectionné/cliqué cette fois.`);
+                    // Consider if a longer wait or different action is needed here
+                    await page.waitForTimeout(5000); // Increased wait time if nothing was selected
                 }
             } catch (error) {
-                // Ce catch est une sécurité supplémentaire si selectNextExercise levait une erreur non prévue
-                logger.error(`Erreur inattendue lors de la tentative de sélection de l'exercice: ${error.message}`);
-                logger.info("Poursuite malgré l'erreur de sélection...");
-                // On continue quand même
+                 // This catch block might be redundant if selectNextExercise handles its errors,
+                 // but keep it for unexpected errors during the call itself.
+                 if (!page || page.isClosed()) {
+                    logger.error(`[${sessionId}] La page est fermée après l'appel à selectNextExercise. Arrêt.`);
+                    break mainLoop;
+                }
+                logger.error(`[${sessionId}] Erreur inattendue AUTOUR de l'appel selectNextExercise: ${error.message}. Poursuite...`);
+                await page.waitForTimeout(2000); // Wait after unexpected error
             }
 
 
             // Vérification du popup (avant ou pendant l'exercice)
-            await checkAndSolvePopup(page, popupSelector, popupCheckTimeout);
+            // Ensure page is still valid before popup check
+            if (!page || page.isClosed()) {
+                logger.error(`[${sessionId}] La page est fermée avant checkAndSolvePopup. Arrêt.`);
+                break mainLoop;
+            }
+            await checkAndSolvePopup(page, popupSelector, popupCheckTimeout, sessionId);
 
-            // Boucle interne pour résoudre les étapes de l'exercice (qu'il ait été sélectionné auto ou manuellement)
-            logger.info('Tentative de résolution d\'un exercice...');
-            innerLoop: while (true) {
-                // Vérification du popup (pendant l'exercice)
-                await checkAndSolvePopup(page, popupSelector, popupCheckTimeout);
+             // Ensure page is still valid before inner loop
+             if (!page || page.isClosed()) {
+                logger.error(`[${sessionId}] La page est fermée avant la boucle interne de résolution. Arrêt.`);
+                break mainLoop;
+            }
 
-                // Résolution de l'étape
-                logger.info('Lancement de solveSingleExercise...');
-                const solveResult = await solveSingleExercise(page);
+            // Boucle interne pour résoudre les étapes (only if an exercise was potentially selected)
+            // We might want to skip this if exerciseSelected is false, depending on desired logic
+            if (exerciseSelected) { // Optional: Only try solving if selection seemed successful
+                logger.info(`[${sessionId}] Tentative de résolution de l'exercice sélectionné...`);
+                innerLoop: while (true) {
+                    // ... (rest of the inner loop remains the same)
+                     if (!page || page.isClosed()) {
+                        logger.error(`[${sessionId}] La page est fermée dans la boucle interne. Arrêt.`);
+                        break mainLoop; // Sortir aussi de la boucle principale
+                    }
 
-                if (solveResult.restartBrowser) {
-                    logger.error('Redémarrage automatique demandé par solveSingleExercise.');
-                    restartRequested = true;
-                    break mainLoop; // Quitte la boucle principale pour redémarrer
-                }
+                    // Vérification du popup
+                    await checkAndSolvePopup(page, popupSelector, popupCheckTimeout, sessionId);
 
-                // Si la résolution échoue (peut-être pas sur une page d'exercice)
-                if (!solveResult.success) {
-                    logger.warn(`Échec de la résolution d'une étape (ou pas sur une page d'exercice?): ${solveResult.error || 'Erreur inconnue'}. Retour à la sélection d'exercice.`);
-                    // On sort de la boucle interne pour retenter une sélection au prochain tour de la boucle principale
-                    break innerLoop;
-                }
+                     if (!page || page.isClosed()) { // Vérifier après le popup
+                        logger.error(`[${sessionId}] La page est fermée après vérif popup dans boucle interne. Arrêt.`);
+                        break mainLoop;
+                    }
 
-                // Si l'exercice est terminé
-                if (solveResult.exerciseComplete) {
-                    logger.info('L\'exercice est marqué comme terminé par solveSingleExercise.');
-                    // On sort de la boucle interne pour chercher le prochain exercice
-                    break innerLoop;
-                }
+                    // Résolution de l'étape
+                    logger.debug(`[${sessionId}] Lancement de solveSingleExercise...`);
+                    const solveResult = await solveSingleExercise(page, sessionId); // Passe sessionId pour logging interne
 
-                // Si une étape a été résolue avec succès mais l'exercice n'est pas fini
-                logger.info('Étape résolue avec succès. Passage à l\'étape suivante de l\'exercice...');
-                await page.waitForTimeout(500 + Math.random() * 500); // Pause entre les étapes
-            } // Fin innerLoop
+                    // Gérer le redémarrage (pour l'instant, arrête juste la session)
+                    if (solveResult.restartBrowser) {
+                        logger.error(`[${sessionId}] Redémarrage demandé par solveSingleExercise. Arrêt de la session.`);
+                        break mainLoop;
+                    }
 
-            // Après la fin de l'innerLoop (exercice terminé ou échec de résolution)
-            logger.info('Fin de la tentative de résolution. Retour à la sélection/attente...');
-            await page.waitForTimeout(1000 + Math.random() * 1000); // Pause avant la prochaine itération de la boucle principale
+                    if (!solveResult.success) {
+                        logger.warn(`[${sessionId}] Échec résolution étape: ${solveResult.error || 'Erreur inconnue'}. Retour sélection.`);
+                        break innerLoop; // Retourne à la sélection d'exercice
+                    }
+
+                    if (solveResult.exerciseComplete) {
+                        logger.info(`[${sessionId}] Exercice terminé.`);
+                        break innerLoop; // Cherche le prochain exercice
+                    }
+
+                    logger.info(`[${sessionId}] Étape résolue. Passage à la suivante...`);
+                    await page.waitForTimeout(500 + Math.random() * 500); // Pause
+                } // Fin innerLoop
+            } else {
+                 logger.info(`[${sessionId}] Saut de la boucle de résolution car aucun exercice n'a été sélectionné.`);
+                 // Wait a bit before trying to select again
+                 await page.waitForTimeout(2000 + Math.random() * 1000);
+            }
+
+            logger.info(`[${sessionId}] Fin de l'itération principale. Retour sélection/attente...`);
+            // Removed the extra wait here as waits are handled within the loop logic now
+            // await page.waitForTimeout(1000 + Math.random() * 1000);
 
         } // Fin mainLoop
 
-        logger.info('Sortie de la boucle principale (normalement via demande de redémarrage).');
+        logger.info(`[${sessionId}] Sortie de la boucle principale.`);
 
     } catch (error) {
-        logger.error('Une erreur critique est survenue dans le flux principal:', error);
+        logger.error(`[${sessionId}] Erreur critique non gérée dans le bloc try de runAccountSession: ${error.message}`, error.stack);
+        // Ne relance pas l'erreur pour ne pas arrêter les autres sessions
     } finally {
-        if (browserInstance && !restartRequested) {
-            logger.info('Fermeture du navigateur...');
-            await closeBrowser(browserInstance);
-            logger.info('Navigateur fermé.');
+        logger.debug(`[${sessionId}] Entrée dans le bloc finally de runAccountSession.`);
+        // Annule le minuteur s'il était actif pour éviter une exécution inutile
+        if (sessionTimerId) {
+            clearTimeout(sessionTimerId);
+            logger.debug(`[${sessionId}] Minuteur de session annulé car la session se termine.`);
         }
-        if (restartRequested) {
-            logger.info('Relance automatique du bot avec node main.js...');
-            spawn(process.argv[0], [process.argv[1]], {
-                stdio: 'inherit',
-                detached: true
-            });
-            process.exit(0);
+        if (sessionTimeIntervalId) {
+            clearInterval(sessionTimeIntervalId);
+            logger.debug(`[${sessionId}] Intervalle d'envoi du temps de session annulé.`);
         }
-        logger.info('Arrêt du bot.');
+        // Ferme la session spécifique, même en cas d'erreur (si pas déjà fermée par le minuteur)
+        // On vérifie si le compte est marqué comme expiré pour éviter une tentative de fermeture redondante
+        if (!expiredAccounts.has(sessionId)) {
+            logger.info(`[${sessionId}] Nettoyage et fermeture de la session (non expirée)...`);
+            await closeBrowserSession(sessionId); // Utilise la fonction de fermeture spécifique
+            logger.info(`[${sessionId}] Session terminée (non expirée).`);
+        } else {
+             logger.info(`[${sessionId}] Session déjà marquée comme expirée ou fermée par le minuteur. Nettoyage final.`);
+             // On pourrait s'assurer ici que la ressource navigateur est bien libérée,
+             // mais closeBrowserSession est censé gérer cela même si appelé plusieurs fois.
+        }
+}
+}
+
+// --- Fonction Principale d'Orchestration ---
+async function startAllSessions() {
+    logger.info('Démarrage du bot Projet Voltaire - Mode Multi-Sessions');
+    let allAccounts = [];
+    let activeAccountIds = null;
+    const activeAccountsPath = path.resolve('config/active_accounts.json');
+
+    try {
+        // 1. Charger tous les comptes depuis .env
+        // 1. Charger tous les comptes depuis le fichier JSON de configuration
+        allAccounts = await loadAccountsFromJSON(); // Charge tous les comptes configurés depuis JSON
+        if (allAccounts.length === 0) {
+            logger.warn("Aucun compte n'a été chargé depuis .env. Vérifiez votre fichier .env");
+            return; // Ne rien faire s'il n'y a pas de comptes
+        }
+        logger.info(`${allAccounts.length} compte(s) trouvé(s) dans .env.`);
+
+        // 2. Essayer de lire les comptes actifs sélectionnés
+        try {
+            const data = await fs.readFile(activeAccountsPath, 'utf-8');
+            const parsedData = JSON.parse(data);
+            if (Array.isArray(parsedData)) {
+                activeAccountIds = new Set(parsedData); // Utilise un Set pour une recherche rapide
+                logger.info(`Sélection de comptes actifs chargée depuis ${activeAccountsPath}: [${parsedData.join(', ')}]`);
+            } else {
+                logger.warn(`Le fichier ${activeAccountsPath} ne contient pas un tableau valide. Tous les comptes seront considérés.`);
+            }
+        } catch (readError) {
+            if (readError.code === 'ENOENT') {
+                logger.info(`Le fichier ${activeAccountsPath} n'existe pas. Tous les comptes seront considérés.`);
+            } else {
+                logger.warn(`Erreur lors de la lecture de ${activeAccountsPath}: ${readError.message}. Tous les comptes seront considérés.`);
+            }
+        }
+
+        // 3. Filtrer les comptes basés sur la sélection (si disponible)
+        let accountsToConsider = allAccounts;
+        if (activeAccountIds) {
+            accountsToConsider = allAccounts.filter(account => activeAccountIds.has(account.id));
+            logger.info(`Filtrage basé sur la sélection : ${accountsToConsider.length} compte(s) actif(s) sélectionné(s).`);
+            if (accountsToConsider.length === 0 && allAccounts.length > 0) {
+                 logger.warn("Aucun des comptes sélectionnés n'est valide ou trouvé. Vérifiez votre sélection et .env.");
+                 // On pourrait vouloir arrêter ici ou continuer avec tous les comptes comme fallback ?
+                 // Pour l'instant, on arrête s'il y avait une sélection mais qu'elle est vide/invalide.
+                 return;
+            }
+        } else {
+             logger.info("Aucune sélection de comptes actifs trouvée, tous les comptes .env seront lancés.");
+        }
+
+
+        // 4. Filtrer les comptes déjà expirés (parmi ceux à considérer)
+        const accountsToRun = accountsToConsider.filter(account => {
+            if (expiredAccounts.has(account.id)) {
+                logger.warn(`[${account.id}] Session non démarrée car le temps alloué est écoulé.`);
+                return false;
+            }
+            return true;
+        });
+
+        if (accountsToRun.length === 0) {
+             logger.info("Aucun compte actif à lancer (tous expirés ou aucun configuré).");
+             // On pourrait vouloir quitter ici si aucun compte n'est actif
+             // process.exit(0); // Optionnel: quitter si rien à faire
+             return; // Ou juste ne rien lancer
+        }
+
+        logger.info(`Lancement effectif de ${accountsToRun.length} session(s)...`);
+
+        // *** NOUVEAU: Log pour confirmer le lancement parallèle ***
+        logger.info(`[Orchestrator] Lancement des ${accountsToRun.length} sessions en parallèle via Promise.allSettled...`);
+        // *** FIN NOUVEAU ***
+
+        // Lance les sessions non expirées en parallèle
+        const sessionPromises = accountsToRun.map(account => runAccountSession(account));
+
+        // Attend que toutes les sessions lancées se terminent (ou échouent individuellement)
+        await Promise.allSettled(sessionPromises);
+
+        logger.info('Toutes les sessions ont terminé leur exécution.');
+
+    } catch (error) {
+        // Erreur lors du chargement des comptes ou autre erreur globale
+        logger.error('Erreur critique lors du démarrage ou de l\'orchestration:', error);
+    } finally {
+        // Assure la fermeture de toute session restante (au cas où Promise.allSettled ne suffirait pas)
+        logger.info('Nettoyage final: Fermeture de toutes les sessions potentiellement restantes...');
+        await closeAllBrowserSessions();
+        logger.info('Arrêt complet du bot.');
+        process.exit(0); // Quitte proprement
     }
 }
 
-// 3. Exécution
-runBot();
+// --- Gestion des signaux d'arrêt ---
+let isShuttingDown = false;
+async function gracefulShutdown(signal) {
+    if (isShuttingDown) return;
+    isShuttingDown = true;
+    logger.warn(`Signal ${signal} reçu. Tentative d'arrêt progressif...`);
+    logger.info('Fermeture de toutes les sessions...');
+    await closeAllBrowserSessions();
+    logger.info('Arrêt terminé.');
+    process.exit(0);
+}
+
+process.on('SIGINT', () => gracefulShutdown('SIGINT')); // Ctrl+C
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM')); // Arrêt système
+
+// --- Exécution ---
+async function main() {
+    await startServer(); // Démarre le serveur web
+    startAllSessions(); // Démarre les sessions du bot
+}
+
+main();
