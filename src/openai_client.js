@@ -1,6 +1,6 @@
-const { OpenAI } = require('openai');
-const config = require('./config_loader');
-const logger = require('./logger');
+import { OpenAI } from 'openai';
+import { config } from './config_loader.js';
+import logger from './logger.js';
 
 const OPENAI_API_KEY = config.OPENAI_API_KEY;
 const OPENAI_MODEL = config.OPENAI_MODEL;
@@ -48,7 +48,7 @@ function tryParseJson(jsonString) {
  * @param {string} promptContent Le contenu du prompt à envoyer à l'IA.
  * @returns {Promise<object>} Une promesse qui résout avec l'objet JSON de la réponse ou un objet d'erreur.
  */
-async function getCorrection(promptContent) {
+export async function getCorrection(promptContent) {
   if (!openai) {
     logger.error("Le client OpenAI n'a pas été initialisé correctement. Impossible d'envoyer le prompt.");
     return { success: false, error: "Client OpenAI non initialisé." };
@@ -63,7 +63,7 @@ async function getCorrection(promptContent) {
   logger.debug(`Envoi du prompt à OpenAI (${OPENAI_MODEL}): ${promptContent}`);
 
   // Choix aléatoire du modèle : 50% de chance d'utiliser le modèle configuré, sinon gpt-4.1-mini
-  const randomModel = Math.random() < 0.6 ? OPENAI_MODEL : 'gpt-4.1-mini';
+  const randomModel = Math.random() < 0.5 ? OPENAI_MODEL : 'gpt-4.1';
   logger.debug(`Modèle utilisé pour cette requête : ${randomModel}`);
 
   try {
@@ -73,7 +73,7 @@ async function getCorrection(promptContent) {
         { role: "system", content: systemMessage },
         { role: "user", content: `${promptContent}` }
       ],
-      temperature: 0.2,
+      temperature: 0.1,
       max_tokens: 2048,
       response_format: { type: "json_object" },
     });
@@ -113,6 +113,93 @@ async function getCorrection(promptContent) {
   }
 }
 
-module.exports = {
-  getCorrection,
-};
+
+/**
+ * Demande une suggestion à l'IA pour résoudre une erreur d'automatisation.
+ * @param {string} errorMessage Le message d'erreur capturé.
+ * @param {string} currentUrl L'URL actuelle de la page.
+ * @param {string} sessionId L'identifiant de la session pour le logging.
+ * @param {string} [screenshotBase64] L'image de la page encodée en base64 (optionnel).
+ * @returns {Promise<{success: boolean, suggestion?: string, error?: string}>}
+ */
+export async function getErrorReportSuggestion(errorMessage, currentUrl, sessionId, screenshotBase64) {
+  if (!openai) {
+    logger.error(`[${sessionId}] [ErrorAssist] Le client OpenAI n'est pas initialisé.`);
+    return { success: false, error: "Client OpenAI non initialisé." };
+  }
+
+  const visionModel = config.OPENAI_VISION_MODEL || 'gpt-4.1'; // Utiliser un modèle vision si configuré
+  const textModel = config.OPENAI_MODEL || 'gpt-4.1';
+  const modelToUse = screenshotBase64 ? visionModel : textModel;
+
+  logger.info(`[${sessionId}] [ErrorAssist] Demande d'assistance IA (${modelToUse}) pour l'erreur: ${errorMessage}`);
+
+  const systemPrompt = "Tu es un assistant expert en automatisation web. Analyse l'erreur fournie, l'URL, et potentiellement l'image de la page. Identifie l'élément UI (bouton, lien, etc.) sur lequel il faudrait probablement cliquer pour résoudre cette erreur ou continuer. Réponds uniquement avec le texte exact visible de l'élément OU un sélecteur CSS unique permettant de le localiser. Si aucun élément pertinent n'est identifiable, réponds 'AUCUNE_ACTION'.";
+
+  const userMessages = [
+    {
+      type: "text",
+      text: `Session ID: ${sessionId}\nURL: ${currentUrl}\nErreur: ${errorMessage}\n\nInstruction: Identifie l'élément UI à cliquer pour résoudre l'erreur. Réponds avec son texte visible ou un sélecteur CSS, ou 'AUCUNE_ACTION'.`
+    }
+  ];
+
+  if (screenshotBase64 && modelToUse === visionModel) {
+    logger.debug(`[${sessionId}] [ErrorAssist] Ajout de la capture d'écran à la requête (modèle vision).`);
+    userMessages.push({
+      type: "image_url",
+      image_url: {
+        url: `data:image/png;base64,${screenshotBase64}`,
+        detail: "low" // ou "high" si plus de détails sont nécessaires
+      }
+    });
+  } else if (screenshotBase64) {
+      logger.warn(`[${sessionId}] [ErrorAssist] Capture d'écran fournie mais le modèle ${modelToUse} ne supporte pas les images. L'image sera ignorée.`);
+  }
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model: modelToUse,
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userMessages }
+      ],
+      temperature: 0.2,
+      max_tokens: 150, // Une réponse courte est attendue
+    });
+
+    if (
+      !completion ||
+      !completion.choices ||
+      !Array.isArray(completion.choices) ||
+      completion.choices.length === 0 ||
+      !completion.choices[0].message ||
+      typeof completion.choices[0].message.content !== 'string'
+    ) {
+      logger.error(`[${sessionId}] [ErrorAssist] Réponse OpenAI invalide ou vide reçue.`, { completion });
+      return { success: false, error: 'Invalid or empty response from OpenAI for error assistance' };
+    }
+
+    const suggestion = completion.choices[0].message.content.trim();
+    logger.info(`[${sessionId}] [ErrorAssist] Suggestion reçue de l'IA: \"${suggestion}\"`);
+
+    // Validation simple de la réponse
+    if (!suggestion) {
+        logger.warn(`[${sessionId}] [ErrorAssist] Suggestion vide reçue de l'IA.`);
+        return { success: true, suggestion: 'AUCUNE_ACTION' }; // Traiter comme aucune action
+    }
+
+    return { success: true, suggestion: suggestion };
+
+  } catch (apiError) {
+    logger.error(`[${sessionId}] [ErrorAssist] Erreur lors de l'appel API OpenAI pour l'assistance:`, apiError);
+    const errorMessageText =
+      apiError?.response?.data?.error?.message ||
+      apiError?.message ||
+      'OpenAI API call failed for error assistance';
+    return {
+      success: false,
+      error: errorMessageText,
+      details: apiError?.response?.data || apiError
+    };
+  }
+}
