@@ -1,7 +1,7 @@
-const logger = require('./logger');
-const { getCorrection } = require('./openai_client');
-const { randomDelay } = require('./human_simulator');
-const config = require('./config_loader');
+import logger from './logger.js';
+import { getCorrection } from './openai_client.js';
+import { randomDelay } from './human_simulator.js';
+import { config } from './config_loader.js';
 
 const MIN_ACTION_DELAY = config.MIN_ACTION_DELAY;
 const MAX_ACTION_DELAY = config.MAX_ACTION_DELAY;
@@ -11,45 +11,19 @@ const MAX_ACTION_DELAY = config.MAX_ACTION_DELAY;
  * @param {string} sentence La phrase à analyser.
  * @returns {boolean} true si la phrase est jugée correcte, false sinon.
  */
-function analyzeSentence(sentence) {
-    if (typeof sentence !== 'string' || !sentence.trim()) {
-        logger.warn('analyzeSentence: phrase vide ou invalide.');
-        return true;
-    }
-    const peutEtreRegex = /\bpeut être\b/i;
-    const peutetreRegex = /\bpeut-être\b/i;
-
-    if (peutEtreRegex.test(sentence)) {
-        logger.debug(`Analyse: "peut être" trouvé. Supposé correct.`);
-        return true;
-    } else if (peutetreRegex.test(sentence)) {
-        const verbPatterns = [
-            /\bpeut-être\s+(un|une|le|la|les|des|ce|cette|ces|mon|ma|mes|ton|ta|tes|son|sa|ses)\b/i,
-            /\bpeut-être\s+\w+(é|ée|és|ées)\b/i,
-            /\bpeut-être\s+(être|avoir|faire|aller)\b/i,
-            /\bpeut-être\s+obligé[es]?\b/i,
-            /\bpeut-être\s+prouvé[es]?\b/i,
-            /\bpeut-être\s+reproduit[es]?\b/i,
-            /\bpeut-être\s+amené[es]?\b/i,
-        ];
-        for (const pattern of verbPatterns) {
-            if (pattern.test(sentence)) {
-                logger.debug(`Analyse: "peut-être" suivi d'un motif verbal ("${pattern}"). Supposé incorrect.`);
-                return false;
-            }
-        }
-        logger.debug(`Analyse: "peut-être" trouvé et supposé utilisé correctement comme adverbe.`);
-        return true;
-    }
-    logger.warn(`Analyse: Règle "peut être/peut-être" non applicable ou logique incomplète pour: "${sentence}"`);
-    return true;
-}
-
 /**
  * Résout le popup intensif phrase par phrase.
  * @param {import('playwright').Page} page L'objet Page de Playwright.
  */
-async function solvePopup(page) {
+
+/**
+ * Gère la résolution d'un popup Correct/Incorrect.
+ * @param {import('playwright').Page} page L'objet Page de Playwright.
+ * @param {import('playwright').Locator} popupElement Le Locator Playwright pointant vers l'élément racine du popup.
+ * @returns {Promise<string|null>} La décision prise ("Correct" ou "Incorrect") ou null en cas d'échec.
+ */
+
+export async function solvePopup(page) {
     logger.info('[solvePopup V3] Début du traitement phrase par phrase...');
     const MAX_ITERATIONS = 50;
     const POPUP_TIMEOUT_MS = 120000;
@@ -170,6 +144,7 @@ async function solvePopup(page) {
                     }
                 } else {
                     logger.debug(`[solvePopup V3 Iter ${iteration}] Question candidate ignorée (Visible: ${isVisible}, Tick: ${hasTick}, Boutons DOM: ${hasButtons}).`);
+                    continue; // Continue to the next question if this one is not a candidate
                 }
             }
 
@@ -257,7 +232,7 @@ async function solvePopup(page) {
  * @param {import('playwright').Locator} popupElement Le Locator Playwright pointant vers l'élément racine du popup.
  * @returns {Promise<string|null>} La décision prise ("Correct" ou "Incorrect") ou null en cas d'échec.
  */
-async function solveCorrectIncorrectPopup(page, popupElement) {
+export async function solveCorrectIncorrectPopup(page, popupElement) {
     logger.info('[solveCorrectIncorrectPopup] Début...');
     try {
         const correctButtonSelector = '.buttonOk';
@@ -348,8 +323,41 @@ async function solveCorrectIncorrectPopup(page, popupElement) {
     }
 }
 
-module.exports = {
-    solvePopup,
-    solveCorrectIncorrectPopup,
-    analyzeSentence
-};
+/**
+ * Analyse une phrase pour déterminer si elle est grammaticalement correcte.
+ * @param {string} sentence La phrase à analyser.
+ * @returns {boolean} true si la phrase est jugée correcte, false sinon.
+ */
+export function analyzeSentence(sentence) {
+    if (typeof sentence !== 'string' || !sentence.trim()) {
+        logger.warn('analyzeSentence: phrase vide ou invalide.');
+        return true;
+    }
+    const peutEtreRegex = /\bpeut être\b/i;
+    const peutetreRegex = /\bpeut-être\b/i;
+
+    if (peutEtreRegex.test(sentence)) {
+        logger.debug(`Analyse: "peut être" trouvé. Supposé correct.`);
+        return true;
+    } else if (peutetreRegex.test(sentence)) {
+        const verbPatterns = [
+            /\bpeut-être\s+(un|une|le|la|les|des|ce|cette|ces|mon|ma|mes|ton|ta|tes|son|sa|ses)\b/i,
+            /\bpeut-être\s+\w+(é|ée|és|ées)\b/i,
+            /\bpeut-être\s+(être|avoir|faire|aller)\b/i,
+            /\bpeut-être\s+obligé[es]?\b/i,
+            /\bpeut-être\s+prouvé[es]?\b/i,
+            /\bpeut-être\s+reproduit[es]?\b/i,
+            /\bpeut-être\s+amené[es]?\b/i,
+        ];
+        for (const pattern of verbPatterns) {
+            if (pattern.test(sentence)) {
+                logger.debug(`Analyse: "peut-être" suivi d'un motif verbal ("${pattern}"). Supposé incorrect.`);
+                return false;
+            }
+        }
+        logger.debug(`Analyse: "peut-être" trouvé et supposé utilisé correctement comme adverbe.`);
+        return true;
+    }
+    logger.warn(`Analyse: Règle "peut être/peut-être" non applicable ou logique incomplète pour: "${sentence}"`);
+    return true;
+}
