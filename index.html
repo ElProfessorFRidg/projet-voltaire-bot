@@ -5,10 +5,12 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Gestion des Comptes Utilisateurs</title>
     <link rel="stylesheet" href="style.css">
+    <!-- Chart.js CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body>
 <!-- Notifications toast -->
-<div id="notification-container"></div>
+<div id="notifications-container"></div>
     <h1>Gestion des Comptes Utilisateurs</h1>
 
     <div class="container">
@@ -17,6 +19,7 @@
             <ul id="account-list">
                 <!-- Les comptes seront chargés ici par JavaScript -->
             </ul>
+<button id="save-active-accounts-btn">Sauvegarder la sélection des comptes actifs</button>
             <button id="add-account-btn">Ajouter un Compte</button>
         </div>
 
@@ -37,7 +40,12 @@
         </div>
     </div>
 
+    <!-- Dashboard : Filtres et Graphiques -->
+    <!-- [SUPPRIMÉ] Panneau dashboard et ses composants pour simplification de l’interface -->
+
 <!-- Modal/Formulaire pour ajout/modification de compte -->
+    <!-- [SUPPRIMÉ] Imports dashboard : filters.js, charts.js -->
+    <!-- <script src="main.js"></script> -->
     <script src="script.js"></script>
 <!-- Bouton switch mode sombre/clair -->
 <button id="theme-toggle-btn" title="Basculer mode sombre/clair" aria-label="Basculer mode sombre/clair">🌙</button>
