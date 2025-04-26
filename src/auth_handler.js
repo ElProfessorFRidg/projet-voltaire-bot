@@ -26,7 +26,7 @@ export async function login(page, email, password) {
   try {
     // Navigation vers la page de connexion
     await page.goto(LOGIN_URL, { waitUntil: 'networkidle' });
-    logger.info('Page de connexion chargée.');
+    logger.debug('Page de connexion chargée.');
     // Vérification si la session est déjà authentifiée
     try {
       const isAuthenticated = await page.locator(successSelector).isVisible({ timeout: 5000 }); // Court timeout
@@ -46,7 +46,7 @@ export async function login(page, email, password) {
     await emailField.waitFor({ state: 'visible', timeout: 10000 });
     logger.debug('Saisie de l\'email...');
     await emailField.type(email, { delay: getRandomInt(MIN_TYPING_DELAY, MAX_TYPING_DELAY) });
-    logger.info(`Email saisi pour ${email}.`); // Log l'email utilisé
+    logger.debug(`Email saisi pour ${email}.`); // Log l'email utilisé
 
     // Saisie du mot de passe
     await randomDelay(MIN_ACTION_DELAY, MAX_ACTION_DELAY);
@@ -55,7 +55,7 @@ export async function login(page, email, password) {
     await passwordField.waitFor({ state: 'visible', timeout: 10000 });
     logger.debug('Saisie du mot de passe...');
     await passwordField.type(password, { delay: getRandomInt(MIN_TYPING_DELAY, MAX_TYPING_DELAY) });
-    logger.info('Mot de passe saisi.'); // Ne pas logger le mot de passe
+    logger.debug('Mot de passe saisi.'); // Ne pas logger le mot de passe
 
     // Soumission du formulaire
     await randomDelay(MIN_ACTION_DELAY, MAX_ACTION_DELAY);
@@ -63,10 +63,10 @@ export async function login(page, email, password) {
     const submitButton = page.locator(submitButtonSelector);
     await submitButton.waitFor({ state: 'visible', timeout: 10000 });
     await submitButton.click();
-    logger.info('Formulaire soumis.');
+    logger.debug('Formulaire soumis.');
 
     // Attente du résultat de la connexion
-    logger.info('Attente du résultat de la connexion (succès ou erreur)...');
+    logger.debug('Attente du résultat de la connexion (succès ou erreur)...');
     try {
       await Promise.race([
         page.waitForSelector(successSelector, { state: 'visible', timeout: 15000 }),
