@@ -8,6 +8,7 @@ import { config, loadAccountsFromJSON } from './src/config_loader.js'; // Import
 import { startServer } from './src/server.js'; // Importe la fonction de démarrage du serveur
 import fs from 'fs/promises'; // Pour lire le fichier des comptes actifs
 import path from 'path'; // Pour gérer les chemins
+import selectors from './src/selectors.js'; // Correction : centralisation des sélecteurs popup
 // import { spawn } from 'child_process'; // Désactivé car non utilisé pour le redémarrage
 
 // Si Node < 18, décommenter la ligne suivante et installer node-fetch
@@ -30,6 +31,13 @@ if (!fetchRef) {
 // --- État Global ---
 /** Stocke les IDs des sessions dont le minuteur a expiré */
 const expiredAccounts = new Set();
+// Fonction utilitaire pour "dé-expirer" un compte si sa sessionEnd a été prolongée
+function resetExpiredAccountIfNeeded(account) {
+    if (expiredAccounts.has(account.id) && account.sessionEnd && account.sessionEnd > Date.now()) {
+        expiredAccounts.delete(account.id);
+        logger.info(`[${account.id}] Le compte a été réactivé (sessionEnd prolongé).`);
+    }
+}
 
 // --- Fonctions utilitaires internes ---
 
@@ -97,7 +105,7 @@ async function selectNextExercise(page, sessionId) {
     `;
     const launchButtonSelector = 'button.activity-selector-cell-launch-button, button.validation-activity-cell-launch-button';
 
-    logger.info(`[${sessionId}] Recherche du prochain exercice à lancer (Selector: ${nextExerciseCellSelector.replace(/\s+/g, ' ').trim()})...`);
+    logger.debug(`[${sessionId}] Recherche du prochain exercice à lancer (Selector: ${nextExerciseCellSelector.replace(/\s+/g, ' ').trim()})...`);
 
     try {
         // Find the first VISIBLE element matching the selector
@@ -109,7 +117,7 @@ async function selectNextExercise(page, sessionId) {
         await targetCell.waitFor({ state: 'visible', timeout: 15000 }); // Keep a timeout
 
         const cellHTML = await targetCell.innerHTML().catch(() => 'N/A'); // Get HTML for logging
-        logger.info(`[${sessionId}] Cellule d'exercice visible trouvée. HTML (extrait): ${cellHTML.substring(0, 100)}...`);
+        logger.debug(`[${sessionId}] Cellule d'exercice visible trouvée. HTML (extrait): ${cellHTML.substring(0, 100)}...`);
 
         const launchButton = targetCell.locator(launchButtonSelector);
         // Reduced timeout for button check as the cell is already confirmed visible
@@ -117,21 +125,21 @@ async function selectNextExercise(page, sessionId) {
         logger.debug(`[${sessionId}] Vérification du bouton 'Lancer' (Selector: ${launchButtonSelector}). Visible: ${isButtonVisible}`);
 
         if (isButtonVisible) {
-            logger.info(`[${sessionId}] Bouton "Lancer" trouvé et visible. Clic sur le bouton...`);
+            logger.debug(`[${sessionId}] Bouton "Lancer" trouvé et visible. Clic sur le bouton...`);
             await launchButton.click({ timeout: 5000 });
         } else {
             // If the button isn't there or visible quickly, click the cell itself
-            logger.info(`[${sessionId}] Bouton "Lancer" non visible rapidement. Clic sur la cellule principale...`);
+            logger.debug(`[${sessionId}] Bouton "Lancer" non visible rapidement. Clic sur la cellule principale...`);
             await targetCell.click({ timeout: 5000 });
         }
-        logger.info(`[${sessionId}] Clic effectué sur l'exercice/bouton.`);
+        logger.debug(`[${sessionId}] Clic effectué sur l'exercice/bouton.`);
         return true;
     } catch (error) {
         // ... existing error handling ...
         if (error.name === 'TimeoutError') {
             // Log specific timeout details
             if (error.message.includes('waitFor') || error.message.includes('filter')) { // Updated check
-                 logger.info(`[${sessionId}] Timeout: Aucun exercice VISIBLE correspondant aux sélecteurs n'a été trouvé dans les délais.`);
+                 logger.debug(`[${sessionId}] Timeout: Aucun exercice VISIBLE correspondant aux sélecteurs n'a été trouvé dans les délais.`);
             } else if (error.message.includes('click')) {
                  logger.warn(`[${sessionId}] Timeout lors du clic sur l'élément trouvé. L'élément est peut-être devenu non interactif.`);
             } else {
@@ -160,7 +168,7 @@ async function runAccountSession(account) {
     // --- Gestion du Minuteur de Session ---
     const durationMs = parseDurationToMs(account.sessionDuration);
     if (durationMs !== null) {
-        logger.info(`[${sessionId}] Minuteur de session configuré pour ${account.sessionDuration} (${durationMs}ms).`);
+        logger.debug(`[${sessionId}] Minuteur de session configuré pour ${account.sessionDuration} (${durationMs}ms).`);
         sessionTimerId = setTimeout(async () => {
             logger.debug(`[${sessionId}] Fonction de rappel du minuteur déclenchée.`);
             // Vérifier si le compte n'est pas déjà marqué comme expiré (évite double exécution)
@@ -186,7 +194,7 @@ async function runAccountSession(account) {
         // Si une durée était fournie mais invalide
         logger.warn(`[${sessionId}] Durée de session fournie ("${account.sessionDuration}") invalide. Aucun minuteur démarré.`);
     } else {
-        logger.info(`[${sessionId}] Aucune durée de session configurée. Session illimitée.`);
+        logger.debug(`[${sessionId}] Aucune durée de session configurée. Session illimitée.`);
     }
     // -------------------------------------
 
@@ -226,13 +234,13 @@ async function runAccountSession(account) {
     // ------------------------------------------------------
 
     try {
-        logger.info(`[${sessionId}] Initialisation du navigateur...`);
+        logger.debug(`[${sessionId}] Initialisation du navigateur...`);
         // Utilise les options de config pour headless, etc.
         sessionData = await initializeBrowserSession(sessionId, { headless: false }); // TODO: Rendre headless configurable
         const { page } = sessionData;
-        logger.info(`[${sessionId}] Navigateur initialisé.`);
+        logger.debug(`[${sessionId}] Navigateur initialisé.`);
 
-        logger.info(`[${sessionId}] Tentative de connexion...`);
+        logger.debug(`[${sessionId}] Tentative de connexion...`);
         logger.debug(`[${sessionId}] Appel de login avec email: ${account.email}`);
         const loginResult = await login(page, account.email, account.password);
         logger.debug(`[${sessionId}] Retour de login: ${JSON.stringify(loginResult)}`);
@@ -241,16 +249,16 @@ async function runAccountSession(account) {
             logger.error(`[${sessionId}] Échec de la connexion: ${loginResult.error || 'Raison inconnue'}`);
             throw new Error('Échec de la connexion'); // Arrête cette session
         }
-        logger.info(`[${sessionId}] Connexion réussie.`);
+        logger.debug(`[${sessionId}] Connexion réussie.`);
         logger.debug(`[${sessionId}] Connexion réussie. Préparation de la boucle principale.`);
 
-        const popupSelector = '.popupContent .intensiveTraining';
+        const popupSelector = selectors.popup; // Correction : utilisation du sélecteur centralisé
         const popupCheckTimeout = 3000;
 
         // Boucle principale pour CETTE session
         logger.debug(`[${sessionId}] Entrée dans la boucle principale.`);
         mainLoop: while (true) {
-            logger.info(`[${sessionId}] Début de la boucle: Recherche/attente exercice...`);
+            logger.debug(`[${sessionId}] Début de la boucle: Recherche/attente exercice...`);
             logger.debug(`[${sessionId}] Début de l'itération de la boucle principale.`);
 
             // Vérifier si la page/contexte est toujours valide avant chaque action majeure
@@ -283,11 +291,11 @@ async function runAccountSession(account) {
                 exerciseSelected = await selectNextExercise(page, sessionId); // Existing call
                 logger.debug(`[${sessionId}] Retour de selectNextExercise: ${exerciseSelected}`);
                 if (exerciseSelected) {
-                    logger.info(`[${sessionId}] Exercice sélectionné avec succès.`);
+                    logger.debug(`[${sessionId}] Exercice sélectionné avec succès.`);
                     // Short delay after successful selection/click might be needed for UI to update
                     await page.waitForTimeout(config.MIN_ACTION_DELAY + Math.random() * (config.MAX_ACTION_DELAY - config.MIN_ACTION_DELAY));
                 } else {
-                    logger.info(`[${sessionId}] Aucun exercice n'a pu être sélectionné/cliqué cette fois.`);
+                    logger.debug(`[${sessionId}] Aucun exercice n'a pu être sélectionné/cliqué cette fois.`);
                     // Consider if a longer wait or different action is needed here
                     await page.waitForTimeout(5000); // Increased wait time if nothing was selected
                 }
@@ -320,7 +328,7 @@ async function runAccountSession(account) {
             // Boucle interne pour résoudre les étapes (only if an exercise was potentially selected)
             // We might want to skip this if exerciseSelected is false, depending on desired logic
             if (exerciseSelected) { // Optional: Only try solving if selection seemed successful
-                logger.info(`[${sessionId}] Tentative de résolution de l'exercice sélectionné...`);
+                logger.debug(`[${sessionId}] Tentative de résolution de l'exercice sélectionné...`);
                 innerLoop: while (true) {
                     // ... (rest of the inner loop remains the same)
                      if (!page || page.isClosed()) {
@@ -352,20 +360,20 @@ async function runAccountSession(account) {
                     }
 
                     if (solveResult.exerciseComplete) {
-                        logger.info(`[${sessionId}] Exercice terminé.`);
+                        logger.debug(`[${sessionId}] Exercice terminé.`);
                         break innerLoop; // Cherche le prochain exercice
                     }
 
-                    logger.info(`[${sessionId}] Étape résolue. Passage à la suivante...`);
+                    logger.debug(`[${sessionId}] Étape résolue. Passage à la suivante...`);
                     await page.waitForTimeout(500 + Math.random() * 500); // Pause
                 } // Fin innerLoop
             } else {
-                 logger.info(`[${sessionId}] Saut de la boucle de résolution car aucun exercice n'a été sélectionné.`);
+                 logger.debug(`[${sessionId}] Saut de la boucle de résolution car aucun exercice n'a été sélectionné.`);
                  // Wait a bit before trying to select again
                  await page.waitForTimeout(2000 + Math.random() * 1000);
             }
 
-            logger.info(`[${sessionId}] Fin de l'itération principale. Retour sélection/attente...`);
+            logger.debug(`[${sessionId}] Fin de l'itération principale. Retour sélection/attente...`);
             // Removed the extra wait here as waits are handled within the loop logic now
             // await page.waitForTimeout(1000 + Math.random() * 1000);
 
@@ -390,11 +398,11 @@ async function runAccountSession(account) {
         // Ferme la session spécifique, même en cas d'erreur (si pas déjà fermée par le minuteur)
         // On vérifie si le compte est marqué comme expiré pour éviter une tentative de fermeture redondante
         if (!expiredAccounts.has(sessionId)) {
-            logger.info(`[${sessionId}] Nettoyage et fermeture de la session (non expirée)...`);
+            logger.debug(`[${sessionId}] Nettoyage et fermeture de la session (non expirée)...`);
             await closeBrowserSession(sessionId); // Utilise la fonction de fermeture spécifique
             logger.info(`[${sessionId}] Session terminée (non expirée).`);
         } else {
-             logger.info(`[${sessionId}] Session déjà marquée comme expirée ou fermée par le minuteur. Nettoyage final.`);
+             logger.debug(`[${sessionId}] Session déjà marquée comme expirée ou fermée par le minuteur. Nettoyage final.`);
              // On pourrait s'assurer ici que la ressource navigateur est bien libérée,
              // mais closeBrowserSession est censé gérer cela même si appelé plusieurs fois.
         }
@@ -407,16 +415,67 @@ async function startAllSessions() {
     let allAccounts = [];
     let activeAccountIds = null;
     const activeAccountsPath = path.resolve('config/active_accounts.json');
+    const sessionTimesPath = path.resolve('config/session_times.json');
+    let sessionTimes = {};
 
     try {
-        // 1. Charger tous les comptes depuis .env
+        // Charger session_times.json pour la persistance du temps restant
+        try {
+            const sessionTimesRaw = await fs.readFile(sessionTimesPath, 'utf-8');
+            sessionTimes = JSON.parse(sessionTimesRaw);
+        } catch (e) {
+            sessionTimes = {};
+        }
+
         // 1. Charger tous les comptes depuis le fichier JSON de configuration
-        allAccounts = await loadAccountsFromJSON(); // Charge tous les comptes configurés depuis JSON
+        allAccounts = await loadAccountsFromJSON();
+
+        // Initialiser expiredAccounts en fonction de sessionTimes.json et de la config
+        for (const account of allAccounts) {
+            const st = sessionTimes[account.id];
+            let remaining = null;
+            if (st && typeof st.remainingTime === "number" && typeof st.lastUpdate === "number") {
+                remaining = st.remainingTime - (now - st.lastUpdate);
+            }
+            // Si la durée a été prolongée (sessionEnd > now et différente de la précédente), on "dé-expire"
+            if (account.sessionEnd && account.sessionEnd > now) {
+                // Si la sessionTimes n'est pas à jour, on la met à jour
+                if (!st || !st.remainingTime || (st.lastUpdate && remaining <= 0)) {
+                    sessionTimes[account.id] = {
+                        remainingTime: account.sessionEnd - now,
+                        lastUpdate: now
+                    };
+                }
+            }
+        // Si le temps restant est <= 0, on expire le compte
+            if (remaining !== null && remaining <= 0) {
+                expiredAccounts.add(account.id);
+                // Désactive automatiquement le compte expiré
+                try {
+                    const accountsPath = path.resolve('config/accounts_config.json');
+                    const accountsData = JSON.parse(await fs.readFile(accountsPath, 'utf-8'));
+                    const idx = accountsData.findIndex(acc => acc.id === account.id);
+                    if (idx !== -1 && accountsData[idx].isEnabled !== false) {
+                        accountsData[idx].isEnabled = false;
+                        await fs.writeFile(accountsPath, JSON.stringify(accountsData, null, 2));
+                        logger.info(`[${account.id}] Compte désactivé automatiquement car expiré.`);
+                    }
+                } catch (e) {
+                    logger.warn(`[${account.id}] Impossible de désactiver automatiquement le compte expiré : ${e.message}`);
+                }
+            }
+        }
+    } catch (error) {
+        // Erreur lors du chargement des comptes ou autre erreur globale
+        logger.error('Erreur critique lors du chargement des comptes:', error);
+    }
+
+    try {
         if (allAccounts.length === 0) {
             logger.warn("Aucun compte n'a été chargé depuis .env. Vérifiez votre fichier .env");
             return; // Ne rien faire s'il n'y a pas de comptes
         }
-        logger.info(`${allAccounts.length} compte(s) trouvé(s) dans .env.`);
+        logger.info(`${allAccounts.length} compte(s) trouvé(s) dans accounts_config.json.`);
 
         // 2. Essayer de lire les comptes actifs sélectionnés
         try {
@@ -424,7 +483,7 @@ async function startAllSessions() {
             const parsedData = JSON.parse(data);
             if (Array.isArray(parsedData)) {
                 activeAccountIds = new Set(parsedData); // Utilise un Set pour une recherche rapide
-                logger.info(`Sélection de comptes actifs chargée depuis ${activeAccountsPath}: [${parsedData.join(', ')}]`);
+                logger.debug(`Sélection de comptes actifs chargée depuis ${activeAccountsPath}: [${parsedData.join(', ')}]`);
             } else {
                 logger.warn(`Le fichier ${activeAccountsPath} ne contient pas un tableau valide. Tous les comptes seront considérés.`);
             }
@@ -440,7 +499,7 @@ async function startAllSessions() {
         let accountsToConsider = allAccounts;
         if (activeAccountIds) {
             accountsToConsider = allAccounts.filter(account => activeAccountIds.has(account.id));
-            logger.info(`Filtrage basé sur la sélection : ${accountsToConsider.length} compte(s) actif(s) sélectionné(s).`);
+            logger.debug(`Filtrage basé sur la sélection : ${accountsToConsider.length} compte(s) actif(s) sélectionné(s).`);
             if (accountsToConsider.length === 0 && allAccounts.length > 0) {
                  logger.warn("Aucun des comptes sélectionnés n'est valide ou trouvé. Vérifiez votre sélection et .env.");
                  // On pourrait vouloir arrêter ici ou continuer avec tous les comptes comme fallback ?
@@ -448,7 +507,7 @@ async function startAllSessions() {
                  return;
             }
         } else {
-             logger.info("Aucune sélection de comptes actifs trouvée, tous les comptes .env seront lancés.");
+             logger.debug("Aucune sélection de comptes actifs trouvée, tous les comptes .env seront lancés.");
         }
 
 
@@ -456,6 +515,10 @@ async function startAllSessions() {
         const accountsToRun = accountsToConsider.filter(account => {
             if (expiredAccounts.has(account.id)) {
                 logger.warn(`[${account.id}] Session non démarrée car le temps alloué est écoulé.`);
+                return false;
+            }
+            if (account.isEnabled === false) {
+                logger.info(`[${account.id}] Session non démarrée car le compte est désactivé (isEnabled=false).`);
                 return false;
             }
             return true;
@@ -469,9 +532,13 @@ async function startAllSessions() {
         }
 
         logger.info(`Lancement effectif de ${accountsToRun.length} session(s)...`);
+        logger.info('Comptes lancés :', accountsToRun.map(acc => `${acc.id} (${acc.email})`).join(', '));
+        if (accountsToRun.length === 0) {
+            logger.warn('Aucun compte actif à lancer (tous expirés, désactivés ou non sélectionnés). Vérifiez accounts_config.json et active_accounts.json.');
+        }
 
         // *** NOUVEAU: Log pour confirmer le lancement parallèle ***
-        logger.info(`[Orchestrator] Lancement des ${accountsToRun.length} sessions en parallèle via Promise.allSettled...`);
+        logger.debug(`[Orchestrator] Lancement des ${accountsToRun.length} sessions en parallèle via Promise.allSettled...`);
         // *** FIN NOUVEAU ***
 
         // Lance les sessions non expirées en parallèle
@@ -487,7 +554,7 @@ async function startAllSessions() {
         logger.error('Erreur critique lors du démarrage ou de l\'orchestration:', error);
     } finally {
         // Assure la fermeture de toute session restante (au cas où Promise.allSettled ne suffirait pas)
-        logger.info('Nettoyage final: Fermeture de toutes les sessions potentiellement restantes...');
+        logger.debug('Nettoyage final: Fermeture de toutes les sessions potentiellement restantes...');
         await closeAllBrowserSessions();
         logger.info('Arrêt complet du bot.');
         process.exit(0); // Quitte proprement
@@ -500,7 +567,7 @@ async function gracefulShutdown(signal) {
     if (isShuttingDown) return;
     isShuttingDown = true;
     logger.warn(`Signal ${signal} reçu. Tentative d'arrêt progressif...`);
-    logger.info('Fermeture de toutes les sessions...');
+    logger.debug('Fermeture de toutes les sessions...');
     await closeAllBrowserSessions();
     logger.info('Arrêt terminé.');
     process.exit(0);
@@ -512,6 +579,11 @@ process.on('SIGTERM', () => gracefulShutdown('SIGTERM')); // Arrêt système
 // --- Exécution ---
 async function main() {
     await startServer(); // Démarre le serveur web
+    // Si MODE=server, ne pas lancer le bot
+    if (process.env.MODE === "server") {
+        logger.info("MODE=server : seul le serveur web est lancé.");
+        return;
+    }
     startAllSessions(); // Démarre les sessions du bot
 }
 
