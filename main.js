@@ -430,7 +430,7 @@ async function startAllSessions() {
         // 1. Charger tous les comptes depuis le fichier JSON de configuration
         allAccounts = await loadAccountsFromJSON();
 
-        // Initialiser expiredAccounts en fonction de sessionTimes.json et de la config
+        const now = Date.now();
         for (const account of allAccounts) {
             const st = sessionTimes[account.id];
             let remaining = null;

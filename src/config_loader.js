@@ -12,6 +12,7 @@ const DEFAULTS = {
   MAX_TYPING_DELAY: 150,
   LOGIN_URL: 'https://compte.groupe-voltaire.fr/login'
 };
+const WEB_CONFIG_PATH = path.resolve('config/web_config.json');
 
 /**
  * Vérifie que les variables d'environnement essentielles (hors comptes) sont définies.
@@ -136,6 +137,42 @@ let currentConfig = {
     : DEFAULTS.LOGIN_URL
 };
 
+/**
+ * Charge la configuration web depuis config/web_config.json et fusionne avec currentConfig.
+ * Les valeurs du fichier web_config.json ont priorité sur celles de .env.
+ */
+async function loadWebConfig() {
+  try {
+    const data = await fs.readFile(WEB_CONFIG_PATH, 'utf-8');
+    const webConfig = JSON.parse(data);
+
+    // On ne fusionne que les clés connues (hors clé API)
+    const updatableKeys = [
+      'OPENAI_MODEL',
+      'MIN_ACTION_DELAY',
+      'MAX_ACTION_DELAY',
+      'MIN_TYPING_DELAY',
+      'MAX_TYPING_DELAY',
+      'LOGIN_URL'
+    ];
+    for (const key of updatableKeys) {
+      if (webConfig.hasOwnProperty(key)) {
+        currentConfig[key] = webConfig[key];
+      }
+    }
+    logger.info('Configuration web chargée depuis web_config.json.');
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      logger.warn('web_config.json non trouvé, utilisation de la configuration par défaut ou .env.');
+    } else {
+      logger.error('Erreur lors du chargement de web_config.json :', error);
+    }
+  }
+}
+
+// Charger la config web au démarrage (avant export)
+await loadWebConfig();
+
 logger.info('Configuration de base chargée et validée.');
 logger.info(`Utilisation du modèle OpenAI : ${currentConfig.OPENAI_MODEL}`);
 
@@ -143,7 +180,7 @@ logger.info(`Utilisation du modèle OpenAI : ${currentConfig.OPENAI_MODEL}`);
  * Met à jour la configuration avec de nouvelles valeurs.
  * @param {object} newValues Les nouvelles valeurs de configuration.
  */
-function updateConfig(newValues) {
+async function updateConfig(newValues) {
     logger.debug('Tentative de mise à jour de la configuration...');
     let configChanged = false;
     const updatableKeys = [
@@ -154,7 +191,7 @@ function updateConfig(newValues) {
         'MAX_TYPING_DELAY',
         'LOGIN_URL'
     ];
-
+    
     for (const key of updatableKeys) {
         if (newValues.hasOwnProperty(key)) {
             let value = newValues[key];
@@ -168,7 +205,7 @@ function updateConfig(newValues) {
                     continue; // Ignore la mise à jour pour cette clé
                 }
             }
-
+    
             if (currentConfig[key] !== value) {
                 logger.debug(`Mise à jour de ${key}: "${currentConfig[key]}" -> "${value}"`);
                 currentConfig[key] = value;
@@ -176,9 +213,22 @@ function updateConfig(newValues) {
             }
         }
     }
-
+    
     if (configChanged) {
         logger.info('Configuration mise à jour avec succès.');
+        // Sauvegarde dans web_config.json
+        try {
+            // On ne sauvegarde que les clés non sensibles
+            const toSave = {};
+            for (const key of updatableKeys) {
+                toSave[key] = currentConfig[key];
+            }
+            await fs.mkdir(path.dirname(WEB_CONFIG_PATH), { recursive: true });
+            await fs.writeFile(WEB_CONFIG_PATH, JSON.stringify(toSave, null, 2), 'utf-8');
+            logger.info('Configuration sauvegardée dans web_config.json.');
+        } catch (error) {
+            logger.error('Erreur lors de la sauvegarde de web_config.json :', error);
+        }
         // TODO: Signaler aux parties du bot qui utilisent la config qu'elle a changé si nécessaire
     } else {
         logger.debug('Aucun changement détecté dans la configuration fournie.');
@@ -189,5 +239,6 @@ function updateConfig(newValues) {
 export {
     currentConfig as config, // Exporte currentConfig sous le nom 'config'
     updateConfig,
-    loadAccountsFromJSON // Exporte la nouvelle fonction
+    loadAccountsFromJSON, // Exporte la nouvelle fonction
+    loadWebConfig
 };

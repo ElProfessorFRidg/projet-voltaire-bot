@@ -60,11 +60,18 @@ app.get('/config', (req, res) => {
 });
 
 // Route pour mettre à jour la configuration
-app.post('/config', (req, res) => {
+app.post('/config', async (req, res) => {
   const newConfigValues = req.body;
-  updateConfig(newConfigValues); // Appelle la fonction de mise à jour
+  await updateConfig(newConfigValues); // Appelle la fonction de mise à jour
 
   res.json({ success: true, message: 'Configuration reçue et appliquée.' });
+});
+
+// Nouveau endpoint POST /api/config pour la persistance web
+app.post('/api/config', async (req, res) => {
+  const newConfigValues = req.body;
+  await updateConfig(newConfigValues);
+  res.json({ success: true, message: 'Configuration web sauvegardée.' });
 });
 
 // Route pour obtenir la liste des comptes (sans mots de passe)

@@ -1,6 +1,7 @@
 import { OpenAI } from 'openai';
 import { config } from './config_loader.js';
 import logger from './logger.js';
+import { JSDOM } from 'jsdom';
 
 const OPENAI_API_KEY = config.OPENAI_API_KEY;
 const OPENAI_MODEL = config.OPENAI_MODEL;
@@ -122,84 +123,167 @@ export async function getCorrection(promptContent) {
  * @param {string} [screenshotBase64] L'image de la page encodée en base64 (optionnel).
  * @returns {Promise<{success: boolean, suggestion?: string, error?: string}>}
  */
-export async function getErrorReportSuggestion(errorMessage, currentUrl, sessionId, screenshotBase64) {
+/**
+ * Demande à l'IA le sélecteur CSS ou XPath du bouton le plus pertinent pour résoudre une erreur, à partir du HTML complet de la page.
+ * Implémente une boucle de relance avec validation stricte du sélecteur (syntaxe, unicité, cliquabilité).
+ * @param {string} errorMessage Le message d'erreur capturé.
+ * @param {string} currentUrl L'URL actuelle de la page.
+ * @param {string} sessionId L'identifiant de la session pour le logging.
+ * @param {string} htmlSource Le code source HTML complet de la page (document.documentElement.outerHTML).
+ * @returns {Promise<{success: boolean, suggestion?: string, error?: string}>}
+ */
+export async function getErrorReportSuggestion(errorMessage, currentUrl, sessionId, htmlSource) {
   if (!openai) {
     logger.error(`[${sessionId}] [ErrorAssist] Le client OpenAI n'est pas initialisé.`);
     return { success: false, error: "Client OpenAI non initialisé." };
   }
 
-  const visionModel = config.OPENAI_VISION_MODEL || 'gpt-4.1'; // Utiliser un modèle vision si configuré
-  const textModel = config.OPENAI_MODEL || 'gpt-4.1';
-  const modelToUse = screenshotBase64 ? visionModel : textModel;
+  // 1. Tronquer le HTML si besoin
+  const MAX_HTML_LENGTH = 200000;
+  let html = htmlSource || '';
+  if (html.length > MAX_HTML_LENGTH) {
+    html = html.slice(0, MAX_HTML_LENGTH);
+    logger.warn(`[${sessionId}] [ErrorAssist] HTML tronqué à ${MAX_HTML_LENGTH} caractères pour l'envoi à l'IA.`);
+  }
 
-  logger.info(`[${sessionId}] [ErrorAssist] Demande d'assistance IA (${modelToUse}) pour l'erreur: ${errorMessage}`);
+  // 2. Prompt de base
+  const basePrompt = `
+Tu es un assistant expert en automatisation web.
+Analyse le HTML fourni et identifie le bouton le plus pertinent sur lequel il faudrait envoyer un clic programmatique pour résoudre le problème ou progresser dans le workflow, même si ce bouton est désactivé ou masqué.
+Réponds UNIQUEMENT par un objet JSON strictement de la forme : { "action": "click_selector", "value": "<sélecteur CSS ou XPath>" }.
+- Si un bouton pertinent existe dans le DOM (même désactivé ou masqué), "action" doit être "click_selector" et "value" doit être un sélecteur CSS ou XPath UNIQUE, non vide, ciblant ce bouton (button, a[role="button"], input[type="submit"], input[type="button"]).
+- Si aucun bouton n’existe dans le DOM, réponds { "action": "no_action" } (et dans ce cas, n’inclus PAS de champ "value").
+- N’invente jamais de sélecteur si aucun bouton n’existe.
+- Ne réponds rien d’autre que cet objet JSON, sans texte ni explication.
+`;
 
-  const systemPrompt = "Tu es un assistant expert en automatisation web. Analyse l'erreur fournie, l'URL, et potentiellement l'image de la page. Identifie l'élément UI (bouton, lien, etc.) sur lequel il faudrait probablement cliquer pour résoudre cette erreur ou continuer. Réponds uniquement avec le texte exact visible de l'élément OU un sélecteur CSS unique permettant de le localiser. Si aucun élément pertinent n'est identifiable, réponds 'AUCUNE_ACTION'.";
+  // 3. Validation du sélecteur côté Node (syntaxe, unicité, cliquabilité)
+  function validateSelector(selector, html) {
+    if (!selector || typeof selector !== 'string') return false;
+    if (selector === 'AUCUNE_ACTION') return true;
 
-  const userMessages = [
-    {
-      type: "text",
-      text: `Session ID: ${sessionId}\nURL: ${currentUrl}\nErreur: ${errorMessage}\n\nInstruction: Identifie l'élément UI à cliquer pour résoudre l'erreur. Réponds avec son texte visible ou un sélecteur CSS, ou 'AUCUNE_ACTION'.`
+    // On utilise jsdom pour parser le HTML côté Node
+    let dom;
+    try {
+      dom = new JSDOM(html);
+    } catch (e) {
+      logger.error(`[${sessionId}] [ErrorAssist] Erreur parsing HTML pour validation sélecteur: ${e}`);
+      return false;
     }
-  ];
+    const doc = dom.window.document;
 
-  if (screenshotBase64 && modelToUse === visionModel) {
-    logger.debug(`[${sessionId}] [ErrorAssist] Ajout de la capture d'écran à la requête (modèle vision).`);
-    userMessages.push({
-      type: "image_url",
-      image_url: {
-        url: `data:image/png;base64,${screenshotBase64}`,
-        detail: "low" // ou "high" si plus de détails sont nécessaires
+    let elements = [];
+    // Détection CSS ou XPath
+    if (selector.startsWith('/') || selector.startsWith('(')) {
+      // XPath
+      try {
+        let xpathResult = doc.evaluate(selector, doc, null, dom.window.XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
+        for (let i = 0; i < xpathResult.snapshotLength; i++) {
+          elements.push(xpathResult.snapshotItem(i));
+        }
+      } catch (e) {
+        logger.warn(`[${sessionId}] [ErrorAssist] Sélecteur XPath invalide: ${selector}`);
+        return false;
       }
-    });
-  } else if (screenshotBase64) {
-      logger.warn(`[${sessionId}] [ErrorAssist] Capture d'écran fournie mais le modèle ${modelToUse} ne supporte pas les images. L'image sera ignorée.`);
-  }
-
-  try {
-    const completion = await openai.chat.completions.create({
-      model: modelToUse,
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userMessages }
-      ],
-      temperature: 0.2,
-      max_tokens: 150, // Une réponse courte est attendue
-    });
-
+    } else {
+      // CSS
+      try {
+        elements = Array.from(doc.querySelectorAll(selector));
+      } catch (e) {
+        logger.warn(`[${sessionId}] [ErrorAssist] Sélecteur CSS invalide: ${selector}`);
+        return false;
+      }
+    }
+    if (elements.length !== 1) return false;
+    const el = elements[0];
+    // Vérifier la cliquabilité
     if (
-      !completion ||
-      !completion.choices ||
-      !Array.isArray(completion.choices) ||
-      completion.choices.length === 0 ||
-      !completion.choices[0].message ||
-      typeof completion.choices[0].message.content !== 'string'
+      el.tagName === 'BUTTON' ||
+      (el.tagName === 'A' && el.getAttribute('role') === 'button') ||
+      (el.tagName === 'INPUT' && ['submit', 'button'].includes(el.type))
     ) {
-      logger.error(`[${sessionId}] [ErrorAssist] Réponse OpenAI invalide ou vide reçue.`, { completion });
-      return { success: false, error: 'Invalid or empty response from OpenAI for error assistance' };
+      // On accepte même si le bouton est désactivé ou masqué
+      return true;
     }
-
-    const suggestion = completion.choices[0].message.content.trim();
-    logger.info(`[${sessionId}] [ErrorAssist] Suggestion reçue de l'IA: \"${suggestion}\"`);
-
-    // Validation simple de la réponse
-    if (!suggestion) {
-        logger.warn(`[${sessionId}] [ErrorAssist] Suggestion vide reçue de l'IA.`);
-        return { success: true, suggestion: 'AUCUNE_ACTION' }; // Traiter comme aucune action
-    }
-
-    return { success: true, suggestion: suggestion };
-
-  } catch (apiError) {
-    logger.error(`[${sessionId}] [ErrorAssist] Erreur lors de l'appel API OpenAI pour l'assistance:`, apiError);
-    const errorMessageText =
-      apiError?.response?.data?.error?.message ||
-      apiError?.message ||
-      'OpenAI API call failed for error assistance';
-    return {
-      success: false,
-      error: errorMessageText,
-      details: apiError?.response?.data || apiError
-    };
+    return false;
   }
+
+  // 4. Boucle de relance
+  const maxTries = 3;
+  let lastError = null;
+  let lastSelector = null;
+  // Correction : encapsulation du bloc de parsing/validation dans la boucle for
+  for (let attempt = 1; attempt <= maxTries; attempt++) {
+    {
+      const prompt =
+        basePrompt +
+        (attempt > 1
+          ? `\nATTENTION : La réponse précédente était invalide (${lastError || "non conforme"}).
+          Tu dois répondre par un sélecteur CSS ou XPath UNIQUE, qui cible exactement UN bouton cliquable (button, a[role="button"], input[type="submit"], input[type="button"]).`
+          : '');
+  
+      logger.info(`[${sessionId}] [ErrorAssist] Appel OpenAI tentative ${attempt}...`);
+      let completion;
+      try {
+        completion = await openai.chat.completions.create({
+          model: 'gpt-4.1',
+          messages: [
+            { role: "system", content: prompt },
+            { role: "user", content: `URL: ${currentUrl}\nErreur: ${errorMessage}\n\nHTML:\n${html}` }
+          ],
+          temperature: 0.1,
+          max_tokens: 8192,
+        });
+      } catch (apiError) {
+        logger.error(`[${sessionId}] [ErrorAssist] Erreur API OpenAI tentative ${attempt}:`, apiError);
+        lastError = apiError?.message || 'Erreur API';
+        continue;
+      }
+  
+      if (
+        !completion ||
+        !completion.choices ||
+        !Array.isArray(completion.choices) ||
+        completion.choices.length === 0 ||
+        !completion.choices[0].message ||
+        typeof completion.choices[0].message.content !== 'string'
+      ) {
+        lastError = 'Réponse OpenAI vide ou invalide';
+        continue;
+      }
+      let raw = completion.choices[0].message.content.trim();
+      let selector = null;
+      let action = null;
+      let parsed = null;
+      try {
+        parsed = JSON.parse(raw);
+        action = parsed.action;
+        selector = parsed.value;
+      } catch (e) {
+        // fallback : si pas JSON, traiter comme sélecteur brut (pour compatibilité descendante)
+        selector = raw;
+        action = "click_selector";
+        parsed = { action, value: selector };
+      }
+      lastSelector = selector;
+      logger.info(`[${sessionId}] [ErrorAssist] Action proposée (tentative ${attempt}): action="${action}", value="${selector}"`);
+      
+      // Validation stricte de la structure
+      if (action === "no_action") {
+        logger.info(`[${sessionId}] [ErrorAssist] Aucune action suggérée.`);
+        return { success: true, suggestion: { action: "no_action" } };
+      }
+      
+      if (action === "click_selector" && typeof selector === "string" && selector.trim() && validateSelector(selector, html)) {
+        logger.info(`[${sessionId}] [ErrorAssist] Sélecteur validé: "${selector}"`);
+        return { success: true, suggestion: { action: "click_selector", value: selector } };
+      } else {
+        lastError = 'Sélecteur non valide (syntaxe, unicité ou type, ou champ manquant)';
+        logger.warn(`[${sessionId}] [ErrorAssist] Sélecteur rejeté ou structure incorrecte: "${JSON.stringify(parsed)}"`);
+      }
+    }
+  }
+
+  logger.error(`[${sessionId}] [ErrorAssist] Échec après ${maxTries} tentatives. Dernier sélecteur: "${lastSelector}"`);
+  return { success: false, error: `Aucun sélecteur valide trouvé après ${maxTries} essais. Dernier: "${lastSelector}"` };
 }
