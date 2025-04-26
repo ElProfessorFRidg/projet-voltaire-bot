@@ -8,4 +8,5 @@ user_profiles
 accounts_config.json
 active_accounts.json
 session_times.json
-
+tests
+duration.json
