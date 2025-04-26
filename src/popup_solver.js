@@ -2,73 +2,80 @@ import logger from './logger.js';
 import { getCorrection } from './openai_client.js';
 import { randomDelay } from './human_simulator.js';
 import { config } from './config_loader.js';
-
+import selectors from './selectors.js'; // Correction : externalisation des sélecteurs
+ 
 const MIN_ACTION_DELAY = config.MIN_ACTION_DELAY;
 const MAX_ACTION_DELAY = config.MAX_ACTION_DELAY;
 
 /**
- * Analyse une phrase pour déterminer si elle est grammaticalement correcte.
- * @param {string} sentence La phrase à analyser.
- * @returns {boolean} true si la phrase est jugée correcte, false sinon.
+ * Fonction utilitaire pour tenter un clic fallback sur le premier bouton visible d'un popup.
+ * Factorisée pour éviter la duplication dans solveCorrectIncorrectPopup.
+ * @param {import('playwright').Locator} popupElement
+ * @param {string} context
+ * @returns {Promise<string|null>}
  */
+async function tryFallbackClick(popupElement, context = '') {
+    try {
+        const fallbackButton = popupElement.locator('button:visible').first();
+        if (await fallbackButton.count() > 0) {
+            // logger.warn(`[${context}] Tentative de clic fallback.`);
+            await fallbackButton.click();
+            return "FallbackClick";
+        } else {
+            logger.error(`[${context}] Aucun bouton visible pour fallback.`);
+        }
+    } catch (fallbackError) {
+        logger.error(`[${context}] Erreur fallback: ${fallbackError.message}`);
+    }
+    return null;
+}
+ 
 /**
  * Résout le popup intensif phrase par phrase.
  * @param {import('playwright').Page} page L'objet Page de Playwright.
  */
-
+ 
 /**
  * Gère la résolution d'un popup Correct/Incorrect.
  * @param {import('playwright').Page} page L'objet Page de Playwright.
  * @param {import('playwright').Locator} popupElement Le Locator Playwright pointant vers l'élément racine du popup.
  * @returns {Promise<string|null>} La décision prise ("Correct" ou "Incorrect") ou null en cas d'échec.
  */
-
+ 
 export async function solvePopup(page) {
-    logger.info('[solvePopup V3] Début du traitement phrase par phrase...');
+    // logger.info('[solvePopup V3] Début du traitement phrase par phrase...');
     const MAX_ITERATIONS = 50;
     const POPUP_TIMEOUT_MS = 120000;
     const startTime = Date.now();
     let iteration = 0;
     let questionsProcessedCount = 0;
-
-    // Sélecteurs centralisés
-    const selectors = {
-        popup: '.popupContent .intensiveTraining',
-        understoodButton: 'button.understoodButton',
-        questionContainer: '.intensiveQuestion',
-        sentence: '.sentence',
-        correctButton: '.buttonOk',
-        incorrectButton: '.buttonKo',
-        exitButton: '.exitButton',
-        retryButton: '.retryButton',
-        tick: '.tick'
-    };
+    // Correction : suppression de l'objet selectors local, utilisation du module selectors.js
 
     try {
         // Attente du popup
-        logger.info('[solvePopup V3] Attente de l\'apparition du pop-up...');
+        // logger.info('[solvePopup V3] Attente de l\'apparition du pop-up...');
         await page.waitForSelector(selectors.popup, { state: 'visible', timeout: 15000 });
-        logger.info('[solvePopup V3] Pop-up détecté.');
+        // logger.info('[solvePopup V3] Pop-up détecté.');
 
         // Gestion du bouton "J'ai compris"
         try {
             await page.waitForTimeout(5000);
             const understoodButton = page.locator(selectors.understoodButton);
             if (await understoodButton.isVisible({ timeout: 7000 })) {
-                logger.info('[solvePopup V3] Bouton "J\'ai compris" détecté. Attente fixe (3s) + délai aléatoire...');
+                // logger.info('[solvePopup V3] Bouton "J\'ai compris" détecté. Attente fixe (3s) + délai aléatoire...');
                 await page.waitForTimeout(3000);
                 if (await understoodButton.isVisible({ timeout: 500 })) {
                     await understoodButton.click({ timeout: 3000 });
-                    logger.info('[solvePopup V3] Clic sur "J\'ai compris". Attente post-clic...');
+                    // logger.info('[solvePopup V3] Clic sur "J\'ai compris". Attente post-clic...');
                     await page.waitForTimeout(2500);
                 } else {
-                    logger.warn('[solvePopup V3] Bouton "J\'ai compris" devenu invisible pendant l\'attente supplémentaire.');
+                    logger.error('[solvePopup V3] Bouton "J\'ai compris" devenu invisible pendant l\'attente supplémentaire.');
                 }
             } else {
-                logger.info('[solvePopup V3] Bouton "J\'ai compris" non visible dans le délai initial.');
+                // logger.info('[solvePopup V3] Bouton "J\'ai compris" non visible dans le délai initial.');
             }
         } catch (error) {
-            logger.warn(`[solvePopup V3] Erreur gestion bouton "J'ai compris": ${error.message}`);
+            logger.error(`[solvePopup V3] Erreur gestion bouton "J'ai compris": ${error.message}`);
         }
 
         // Boucle principale de traitement
@@ -78,18 +85,18 @@ export async function solvePopup(page) {
                 break;
             }
             iteration++;
-            logger.debug(`[solvePopup V3 Iter ${iteration}/${MAX_ITERATIONS}] Début itération.`);
+            // logger.debug(`[solvePopup V3 Iter ${iteration}/${MAX_ITERATIONS}] Début itération.`);
 
             // Vérifier la présence du popup
             if (!await page.locator(selectors.popup).isVisible({ timeout: 1000 })) {
-                logger.info('[solvePopup V3] Popup principal disparu. Fin du traitement.');
+                // logger.info('[solvePopup V3] Popup principal disparu. Fin du traitement.');
                 break;
             }
 
             // Gestion des boutons de sortie/continuer
             const exitButton = page.locator(selectors.exitButton);
             if (await exitButton.isVisible({ timeout: 500 })) {
-                logger.info('[solvePopup V3] Bouton "Sortir" détecté. Clic et fin.');
+                // logger.info('[solvePopup V3] Bouton "Sortir" détecté. Clic et fin.');
                 try {
                     await exitButton.click({ timeout: 3000 });
                     await page.waitForTimeout(500);
@@ -100,7 +107,7 @@ export async function solvePopup(page) {
             }
             const retryButton = page.locator(selectors.retryButton);
             if (await retryButton.isVisible({ timeout: 500 })) {
-                logger.info('[solvePopup V3] Bouton "Je m\'accroche" détecté. Clic et continue.');
+                // logger.info('[solvePopup V3] Bouton "Je m\'accroche" détecté. Clic et continue.');
                 try {
                     await retryButton.click({ timeout: 3000 });
                     await page.waitForTimeout(1000);
@@ -113,7 +120,7 @@ export async function solvePopup(page) {
             // Recherche de la prochaine question à traiter
             let targetQuestion = null;
             const allQuestions = await page.locator(selectors.questionContainer).all();
-            logger.debug(`[solvePopup V3 Iter ${iteration}] Recherche de la prochaine question parmi ${allQuestions.length} conteneurs.`);
+            // logger.debug(`[solvePopup V3 Iter ${iteration}] Recherche de la prochaine question parmi ${allQuestions.length} conteneurs.`);
 
             for (const question of allQuestions) {
                 let isVisible = false, hasTick = false, hasButtons = false;
@@ -136,14 +143,14 @@ export async function solvePopup(page) {
                         koVisible = await question.locator(selectors.incorrectButton).isVisible({ timeout: 100 });
                     } catch {}
                     if (okVisible || koVisible) {
-                        logger.debug(`[solvePopup V3 Iter ${iteration}] Question candidate trouvée (visible, sans tick, avec boutons visibles).`);
+                        // logger.debug(`[solvePopup V3 Iter ${iteration}] Question candidate trouvée (visible, sans tick, avec boutons visibles).`);
                         targetQuestion = question;
                         break;
                     } else {
-                        logger.debug(`[solvePopup V3 Iter ${iteration}] Question candidate ignorée (boutons OK/KO non visibles).`);
+                        // logger.debug(`[solvePopup V3 Iter ${iteration}] Question candidate ignorée (boutons OK/KO non visibles).`);
                     }
                 } else {
-                    logger.debug(`[solvePopup V3 Iter ${iteration}] Question candidate ignorée (Visible: ${isVisible}, Tick: ${hasTick}, Boutons DOM: ${hasButtons}).`);
+                    // logger.debug(`[solvePopup V3 Iter ${iteration}] Question candidate ignorée (Visible: ${isVisible}, Tick: ${hasTick}, Boutons DOM: ${hasButtons}).`);
                     continue; // Continue to the next question if this one is not a candidate
                 }
             }
@@ -152,7 +159,7 @@ export async function solvePopup(page) {
             if (targetQuestion) {
                 questionsProcessedCount++;
                 const questionLogId = `Q${questionsProcessedCount} (Iter ${iteration})`;
-                logger.info(`[solvePopup V3 ${questionLogId}] Traitement de la question trouvée.`);
+                // logger.info(`[solvePopup V3 ${questionLogId}] Traitement de la question trouvée.`);
 
                 try {
                     const sentenceElement = targetQuestion.locator(selectors.sentence).first();
@@ -161,16 +168,16 @@ export async function solvePopup(page) {
                     const sentenceText = sentenceTextRaw.trim().replace(/\s+/g, ' ');
                     if (!sentenceText) throw new Error("Texte de la phrase vide après nettoyage.");
 
-                    logger.info(`[solvePopup V3 ${questionLogId}] Phrase: "${sentenceText}"`);
+                    // logger.info(`[solvePopup V3 ${questionLogId}] Phrase: "${sentenceText}"`);
 
                     const isCorrect = analyzeSentence(sentenceText);
-                    logger.info(`[solvePopup V3 ${questionLogId}] Analyse: ${isCorrect ? 'Correcte' : 'Incorrecte'}`);
+                    // logger.info(`[solvePopup V3 ${questionLogId}] Analyse: ${isCorrect ? 'Correcte' : 'Incorrecte'}`);
 
                     const buttonToClickLocator = isCorrect ? selectors.correctButton : selectors.incorrectButton;
                     const buttonToClick = targetQuestion.locator(buttonToClickLocator);
                     const buttonLabel = isCorrect ? 'Correct' : 'Incorrect';
 
-                    logger.info(`[solvePopup V3 ${questionLogId}] Clic sur "${buttonLabel}"...`);
+                    // logger.info(`[solvePopup V3 ${questionLogId}] Clic sur "${buttonLabel}"...`);
                     if (
                         await buttonToClick.isVisible({ timeout: 1000 }).catch(() => false) &&
                         await buttonToClick.isEnabled({ timeout: 1000 }).catch(() => false)
@@ -178,7 +185,7 @@ export async function solvePopup(page) {
                         await buttonToClick.click({ timeout: 3000 });
 
                         // Attente disparition des boutons
-                        logger.debug(`[solvePopup V3 ${questionLogId}] Attente disparition boutons...`);
+                        // logger.debug(`[solvePopup V3 ${questionLogId}] Attente disparition boutons...`);
                         try {
                             await page.waitForFunction(
                                 async ({ qElement, btnOkSel, btnKoSel }) => {
@@ -194,18 +201,18 @@ export async function solvePopup(page) {
                                 },
                                 { timeout: 5000 }
                             );
-                            logger.debug(`[solvePopup V3 ${questionLogId}] Boutons disparus ou cachés.`);
+                            // logger.debug(`[solvePopup V3 ${questionLogId}] Boutons disparus ou cachés.`);
                         } catch (waitError) {
                             logger.error(`[solvePopup V3 ${questionLogId}] Timeout attente disparition boutons: ${waitError.message}. L'état pourrait être incohérent.`);
                         }
                     } else {
-                        logger.warn(`[solvePopup V3 ${questionLogId}] Bouton "${buttonLabel}" non cliquable au moment prévu.`);
+                        logger.error(`[solvePopup V3 ${questionLogId}] Bouton "${buttonLabel}" non cliquable au moment prévu.`);
                     }
                 } catch (error) {
                     logger.error(`[solvePopup V3 ${questionLogId}] Erreur traitement question: ${error.message}`);
                 }
             } else {
-                logger.debug(`[solvePopup V3 Iter ${iteration}] Aucune question active trouvée. Attente...`);
+                // logger.debug(`[solvePopup V3 Iter ${iteration}] Aucune question active trouvée. Attente...`);
                 await page.waitForTimeout(1500 + Math.random() * 1000);
             }
             await page.waitForTimeout(200 + Math.random() * 300);
@@ -213,8 +220,8 @@ export async function solvePopup(page) {
 
         if (iteration >= MAX_ITERATIONS) {
             logger.error(`[solvePopup V3] Nombre maximum d'itérations (${MAX_ITERATIONS}) atteint.`);
-        }
-        logger.info(`[solvePopup V3] Fin boucle principale. ${questionsProcessedCount} questions traitées sur ${iteration} itérations.`);
+            }
+            // logger.info(`[solvePopup V3] Fin boucle principale. ${questionsProcessedCount} questions traitées sur ${iteration} itérations.`);
     } catch (error) {
         if (error && error.name === 'TimeoutError') {
             logger.error(`[solvePopup V3] Timeout attente élément clé (popup?): ${error.message}`);
@@ -222,7 +229,7 @@ export async function solvePopup(page) {
             logger.error(`[solvePopup V3] Erreur inattendue: ${error?.message}`, { stack: error?.stack });
         }
     } finally {
-        logger.info('[solvePopup V3] Fin de l\'exécution.');
+        // logger.info('[solvePopup V3] Fin de l\'exécution.');
     }
 }
 
@@ -233,23 +240,21 @@ export async function solvePopup(page) {
  * @returns {Promise<string|null>} La décision prise ("Correct" ou "Incorrect") ou null en cas d'échec.
  */
 export async function solveCorrectIncorrectPopup(page, popupElement) {
-    logger.info('[solveCorrectIncorrectPopup] Début...');
+    // logger.info('[solveCorrectIncorrectPopup] Début...');
     try {
-        const correctButtonSelector = '.buttonOk';
-        const incorrectButtonSelector = '.buttonKo';
         let popupText = null;
         try {
             popupText = await popupElement.textContent({ timeout: 5000 });
         } catch {
-            logger.warn('[solveCorrectIncorrectPopup] Impossible d\'extraire le texte du popup.');
+            logger.error('[solveCorrectIncorrectPopup] Impossible d\'extraire le texte du popup.');
             return null;
         }
         if (!popupText) {
-            logger.warn('[solveCorrectIncorrectPopup] Texte du popup non extrait.');
+            logger.error('[solveCorrectIncorrectPopup] Texte du popup non extrait.');
             return null;
         }
         const cleanedText = popupText.trim().replace(/\s+/g, ' ');
-        logger.debug(`[solveCorrectIncorrectPopup] Texte: "${cleanedText}"`);
+        // logger.debug(`[solveCorrectIncorrectPopup] Texte: "${cleanedText}"`);
 
         const prompt = `Analyse: "${cleanedText}". Indique si c'est CORRECT ou INCORRECT. Réponse JSON: { "decision": "Correct" } ou { "decision": "Incorrect" }`;
         await randomDelay(MIN_ACTION_DELAY, MAX_ACTION_DELAY);
@@ -261,22 +266,13 @@ export async function solveCorrectIncorrectPopup(page, popupElement) {
             !['Correct', 'Incorrect'].includes(decisionResult.data.decision)
         ) {
             logger.error(`[solveCorrectIncorrectPopup] Décision OpenAI invalide.`, { decisionResult });
-            try {
-                const fallbackButton = popupElement.locator('button:visible').first();
-                if (await fallbackButton.count() > 0) {
-                    logger.warn("[solveCorrectIncorrectPopup] Tentative de clic fallback.");
-                    await fallbackButton.click();
-                    return "FallbackClick";
-                }
-            } catch (fallbackError) {
-                logger.error(`[solveCorrectIncorrectPopup] Erreur fallback: ${fallbackError.message}`);
-            }
-            return null;
+            // Correction : utilisation de la fonction utilitaire factorisée
+            return await tryFallbackClick(popupElement, 'solveCorrectIncorrectPopup');
         }
 
         const decision = decisionResult.data.decision;
-        logger.info(`[solveCorrectIncorrectPopup] Décision OpenAI: ${decision}`);
-        const targetButtonSelector = decision === 'Correct' ? correctButtonSelector : incorrectButtonSelector;
+        // logger.info(`[solveCorrectIncorrectPopup] Décision OpenAI: ${decision}`);
+        const targetButtonSelector = decision === 'Correct' ? selectors.correctButton : selectors.incorrectButton;
         const buttonToClick = popupElement.locator(targetButtonSelector);
 
         if (
@@ -284,42 +280,22 @@ export async function solveCorrectIncorrectPopup(page, popupElement) {
             await buttonToClick.isVisible().catch(() => false) &&
             await buttonToClick.isEnabled().catch(() => false)
         ) {
-            logger.info(`[solveCorrectIncorrectPopup] Clic sur "${decision}"...`);
+            // logger.info(`[solveCorrectIncorrectPopup] Clic sur "${decision}"...`);
             await randomDelay(MIN_ACTION_DELAY, MAX_ACTION_DELAY);
             await buttonToClick.click({ timeout: 5000 });
             await page.waitForTimeout(500);
             return decision;
         } else {
             logger.error(`[solveCorrectIncorrectPopup] Bouton "${decision}" non cliquable.`);
-            try {
-                const fallbackButton = popupElement.locator('button:visible').first();
-                if (await fallbackButton.count() > 0) {
-                    logger.warn(`[solveCorrectIncorrectPopup] Tentative clic fallback (bouton cible non trouvé).`);
-                    await fallbackButton.click();
-                    return "FallbackClick";
-                } else {
-                    logger.error("[solveCorrectIncorrectPopup] Aucun bouton visible pour fallback.");
-                }
-            } catch (fallbackError) {
-                logger.error(`[solveCorrectIncorrectPopup] Erreur fallback 2: ${fallbackError.message}`);
-            }
-            return null;
+            // Correction : utilisation de la fonction utilitaire factorisée
+            return await tryFallbackClick(popupElement, 'solveCorrectIncorrectPopup');
         }
     } catch (error) {
         logger.error(`[solveCorrectIncorrectPopup] Erreur: ${error?.message}`, { stack: error?.stack });
-        try {
-            const fallbackButton = popupElement.locator('button:visible').first();
-            if (await fallbackButton.count() > 0) {
-                logger.warn(`[solveCorrectIncorrectPopup] Erreur inattendue, tentative clic fallback.`);
-                await fallbackButton.click();
-                return "FallbackClickOnError";
-            }
-        } catch (fallbackError) {
-            logger.error(`[solveCorrectIncorrectPopup] Erreur fallback 3: ${fallbackError.message}`);
-        }
-        return null;
+        // Correction : utilisation de la fonction utilitaire factorisée
+        return await tryFallbackClick(popupElement, 'solveCorrectIncorrectPopup (catch global)');
     } finally {
-        logger.info('[solveCorrectIncorrectPopup] Fin.');
+        // logger.info('[solveCorrectIncorrectPopup] Fin.');
     }
 }
 
@@ -330,14 +306,14 @@ export async function solveCorrectIncorrectPopup(page, popupElement) {
  */
 export function analyzeSentence(sentence) {
     if (typeof sentence !== 'string' || !sentence.trim()) {
-        logger.warn('analyzeSentence: phrase vide ou invalide.');
+        // logger.warn('analyzeSentence: phrase vide ou invalide.');
         return true;
     }
     const peutEtreRegex = /\bpeut être\b/i;
     const peutetreRegex = /\bpeut-être\b/i;
 
     if (peutEtreRegex.test(sentence)) {
-        logger.debug(`Analyse: "peut être" trouvé. Supposé correct.`);
+        // logger.debug(`Analyse: "peut être" trouvé. Supposé correct.`);
         return true;
     } else if (peutetreRegex.test(sentence)) {
         const verbPatterns = [
@@ -351,13 +327,13 @@ export function analyzeSentence(sentence) {
         ];
         for (const pattern of verbPatterns) {
             if (pattern.test(sentence)) {
-                logger.debug(`Analyse: "peut-être" suivi d'un motif verbal ("${pattern}"). Supposé incorrect.`);
+                // logger.debug(`Analyse: "peut-être" suivi d'un motif verbal ("${pattern}"). Supposé incorrect.`);
                 return false;
             }
         }
-        logger.debug(`Analyse: "peut-être" trouvé et supposé utilisé correctement comme adverbe.`);
+        // logger.debug(`Analyse: "peut-être" trouvé et supposé utilisé correctement comme adverbe.`);
         return true;
     }
-    logger.warn(`Analyse: Règle "peut être/peut-être" non applicable ou logique incomplète pour: "${sentence}"`);
+    // logger.warn(`Analyse: Règle "peut être/peut-être" non applicable ou logique incomplète pour: "${sentence}"`);
     return true;
 }

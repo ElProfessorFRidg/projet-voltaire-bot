@@ -1,12 +1,25 @@
 import cors from 'cors'; // Importe le middleware CORS
 import express from 'express';
-import fs from 'fs/promises'; // Importe le module fs pour les opérations sur les fichiers
-import path from 'path'; // Importe le module path pour gérer les chemins
-import { config, updateConfig, loadAccountsFromJSON } from './config_loader.js'; // Importe la config, la mise à jour et loadAccountsFromJSON
-import logger from './logger.js'; // Importe le logger
+import fs from 'fs/promises'; // Ajout pour la gestion des fichiers actifs
+import path from 'path';
+import { config, updateConfig, loadAccountsFromJSON } from './config_loader.js';
+import logger from './logger.js';
 
 import http from 'http';
 import { Server as SocketIOServer } from 'socket.io';
+import { Mutex } from './async_utils.js';
+import { ValidationError, AppError, handleError } from './error_utils.js';
+import { validateUserFields } from './validation_utils.js';
+import {
+  ensureDirAndWriteFile,
+  readJsonFile,
+  writeJsonFile,
+  readSessionTimes,
+  writeSessionTimes,
+  readDuration,
+  writeDuration
+} from './utils/file_utils.js';
+import { calculateSessionEnd, parseDurationString } from './utils/time_utils.js';
 
 const app = express();
 app.use(cors({
@@ -29,6 +42,12 @@ const io = new SocketIOServer(httpServer, {
 let sessionTimes = {}; // Utiliser let pour pouvoir réassigner au chargement
 const sessionTimesPath = path.resolve('config/session_times.json'); // Chemin vers le fichier de sauvegarde des temps de session
 
+// --- Persistance de la durée globale TimeTracker ---
+const durationPath = path.resolve('config/duration.json');
+
+// Mutex pour protéger l'accès concurrent au fichier des comptes
+const accountsFileMutex = new Mutex();
+
 // --- API pour recevoir les mises à jour du temps de session ---
 // Route pour obtenir la configuration actuelle
 // Route pour obtenir la configuration actuelle (exclut les secrets)
@@ -36,6 +55,7 @@ app.get('/config', (req, res) => {
   const currentConfig = { ...config }; // Copie pour éviter de modifier l'original
   delete currentConfig.OPENAI_API_KEY; // Exclut la clé API
 
+  console.log('[DEBUG] /config renvoie :', currentConfig);
   res.json(currentConfig);
 });
 
@@ -55,24 +75,35 @@ app.get('/accounts', async (req, res) => {
     // Inclure sessionEnd dans la réponse pour chaque compte
     const accountsWithSessionEnd = allAccounts.map(account => {
       const sessionObj = sessionTimes[account.id];
+      // Correction : ne réinitialiser le temps restant que si la durée a changé ou a été explicitement prolongée
+      if (
+        account.sessionEnd &&
+        account.sessionEnd > Date.now() &&
+        (
+          !sessionObj ||
+          !sessionObj.remainingTime ||
+          // Si la sessionDuration a changé (on compare la durée totale attendue)
+          (typeof sessionObj.initialSessionEnd === "undefined" || sessionObj.initialSessionEnd !== account.sessionEnd)
+        )
+      ) {
+        // Nouvelle durée ou prolongation détectée, on réinitialise sessionTimes
+        sessionTimes[account.id] = {
+          remainingTime: account.sessionEnd - Date.now(),
+          lastUpdate: Date.now()
+        };
+        return { ...account, sessionEnd: account.sessionEnd };
+      }
       if (sessionObj && typeof sessionObj === 'object') {
         if (
-          Object.prototype.hasOwnProperty.call(sessionObj, 'sessionEnd') &&
-          typeof sessionObj.sessionEnd === 'number' &&
-          !isNaN(sessionObj.sessionEnd)
-        ) {
-          return { ...account, sessionEnd: sessionObj.sessionEnd };
-        } else if (
           Object.prototype.hasOwnProperty.call(sessionObj, 'remainingTime') &&
           typeof sessionObj.remainingTime === 'number' &&
           !isNaN(sessionObj.remainingTime)
         ) {
+          if (sessionObj.remainingTime <= 0) {
+            return { ...account, sessionEnd: null };
+          }
           return { ...account, sessionEnd: Date.now() + sessionObj.remainingTime };
         }
-      }
-      // Fallback : logique précédente
-      if (account.sessionEnd !== undefined && account.sessionEnd !== null) {
-        return { ...account, sessionEnd: Number(account.sessionEnd) };
       }
       return { ...account, sessionEnd: null };
     });
@@ -112,8 +143,15 @@ app.post('/accounts/active', async (req, res) => {
 app.get('/accounts/active', async (req, res) => {
   try {
       const data = await fs.readFile(activeAccountsPath, 'utf-8');
-      const activeAccounts = JSON.parse(data);
-      res.json(activeAccounts); // Renvoie le tableau des IDs actifs
+      try {
+          const activeAccounts = JSON.parse(data);
+          res.json(activeAccounts); // Renvoie le tableau des IDs actifs
+      } catch (parseError) {
+          logger.error('Fichier active_accounts.json corrompu, suppression et retour tableau vide.', parseError);
+          // Supprimer le fichier corrompu
+          try { await fs.unlink(activeAccountsPath); } catch (e) { /* ignore */ }
+          res.json([]);
+      }
   } catch (error) {
       if (error.code === 'ENOENT') {
           // Si le fichier n'existe pas, renvoyer un tableau vide
@@ -125,82 +163,154 @@ app.get('/accounts/active', async (req, res) => {
   }
 });
 
+// --- Endpoints API pour la durée globale (TimeTracker) ---
+// GET /api/duration : retourne la durée sauvegardée (en ms)
+app.get('/api/duration', async (req, res) => {
+ try {
+   const duration = await readDuration(durationPath);
+   res.json({ duration });
+ } catch (error) {
+   if (error.code === 'ENOENT') {
+     // Fichier non trouvé, retourner 0
+     res.json({ duration: 0 });
+   } else {
+     logger.error('Erreur lors de la lecture de la durée:', error);
+     res.status(500).json({ error: 'Erreur serveur lors de la lecture de la durée.' });
+   }
+ }
+});
+
+// POST /api/duration : sauvegarde la durée reçue (en ms)
+app.post('/api/duration', async (req, res) => {
+ const { duration } = req.body;
+ if (typeof duration !== 'number' || isNaN(duration) || duration < 0) {
+   return res.status(400).json({ success: false, message: 'Durée invalide.' });
+ }
+ try {
+   await writeDuration(durationPath, duration);
+   res.json({ success: true });
+ } catch (error) {
+   logger.error('Erreur lors de la sauvegarde de la durée:', error);
+   res.status(500).json({ success: false, message: 'Erreur serveur lors de la sauvegarde.' });
+ }
+});
+
 // Route pour recevoir les mises à jour de session du frontend
-app.post('/session-update/:accountId', async (req, res) => { // Ajout de async ici
+app.post('/session-update/:accountId', async (req, res) => {
   const { accountId } = req.params;
   const sessionData = req.body;
 
-  logger.info(`Mise à jour de session reçue pour ${accountId}:`, sessionData);
+  logger.debug(`Mise à jour de session reçue pour ${accountId}:`, sessionData);
 
-  // Mettre à jour la structure en mémoire sessionTimes
-  // Stocker l'objet entier reçu pour ce compte pour flexibilité
-  sessionTimes[accountId] = sessionData;
+  // Récupérer l'état actuel pour empêcher la "réactivation" d'un compte expiré
+  const current = sessionTimes[accountId];
+  let isExpired = false;
+  if (
+    current &&
+    typeof current.remainingTime === 'number' &&
+    typeof current.lastUpdate === 'number'
+  ) {
+    const now = Date.now();
+    const elapsed = Math.max(0, now - current.lastUpdate);
+    const timeLeft = Math.max(0, current.remainingTime - elapsed);
+    if (timeLeft <= 0) {
+      isExpired = true;
+    }
+  }
+
+  // Si le compte est expiré, ignorer toute update (sauf reset explicite)
+  if (
+    isExpired &&
+    (!sessionData.reset && !(sessionData.remainingTime > 0))
+  ) {
+    logger.debug(`Update ignorée pour ${accountId} car le temps est expiré.`);
+    return res.json({ success: true, ignored: true });
+  }
+
+  // Nouvelle logique : stocker remainingTime et lastUpdate pour une persistance robuste
+  if (
+    typeof sessionData.remainingTime === 'number' &&
+    typeof sessionData.lastUpdate === 'number'
+  ) {
+    sessionTimes[accountId] = {
+      remainingTime: sessionData.remainingTime,
+      lastUpdate: sessionData.lastUpdate
+    };
+  } else {
+    sessionTimes[accountId] = {};
+  }
 
   // Sauvegarder la structure sessionTimes dans le fichier
   try {
-    await fs.mkdir(path.dirname(sessionTimesPath), { recursive: true });
-    await fs.writeFile(sessionTimesPath, JSON.stringify(sessionTimes, null, 2));
-    logger.info(`sessionTimes sauvegardé dans ${sessionTimesPath}`);
+    await writeSessionTimes(sessionTimesPath, sessionTimes);
+    logger.debug(`sessionTimes sauvegardé dans ${sessionTimesPath}`);
   } catch (error) {
     logger.error(`Erreur lors de la sauvegarde de sessionTimes dans ${sessionTimesPath}:`, error);
     // Ne pas bloquer la réponse même si la sauvegarde échoue
   }
 
-  // Log spécifique si des clés connues sont présentes
-  if (sessionData.remainingTime !== undefined) {
-    logger.info(`Temps restant reçu pour ${accountId}: ${sessionData.remainingTime}`);
-  } else if (sessionData.sessionEnd !== undefined) {
-    logger.info(`SessionEnd reçu pour ${accountId}: ${new Date(sessionData.sessionEnd).toISOString()}`);
+  // Log spécifique
+  if (sessionTimes[accountId].remainingTime !== undefined) {
+    logger.debug(
+      `remainingTime stocké pour ${accountId}: ${sessionTimes[accountId].remainingTime} ms (lastUpdate: ${new Date(sessionTimes[accountId].lastUpdate).toISOString()})`
+    );
   }
 
-  // Répondre au frontend
   res.json({ success: true });
 });
 
 // --- API CRUD pour les comptes (config/accounts_config.json) ---
 // Fonction utilitaire pour lire les comptes depuis JSON
+/**
+ * Lecture protégée par mutex pour éviter les accès concurrents au fichier des comptes.
+ */
 async function readAccountsFile() {
-    try {
-        const data = await fs.readFile(activeAccountsPath.replace('active_accounts.json', 'accounts_config.json'), 'utf-8'); // Assurez-vous que le chemin est correct
-        return JSON.parse(data);
-    } catch (error) {
-        if (error.code === 'ENOENT') {
-            return []; // Retourne un tableau vide si le fichier n'existe pas
-        }
-        throw error; // Relance les autres erreurs
-    }
+    return await accountsFileMutex.runExclusive(async () => {
+        const accountsPath = activeAccountsPath.replace('active_accounts.json', 'accounts_config.json');
+        const data = await readJsonFile(accountsPath);
+        return data || [];
+    });
 }
 
 // Fonction utilitaire pour écrire les comptes dans JSON
+/**
+ * Écriture protégée par mutex pour éviter les accès concurrents au fichier des comptes.
+ */
 async function writeAccountsFile(accounts) {
-    const accountsPath = activeAccountsPath.replace('active_accounts.json', 'accounts_config.json');
-    await fs.mkdir(path.dirname(accountsPath), { recursive: true });
-    await fs.writeFile(accountsPath, JSON.stringify(accounts, null, 2));
+    await accountsFileMutex.runExclusive(async () => {
+        const accountsPath = activeAccountsPath.replace('active_accounts.json', 'accounts_config.json');
+        await writeJsonFile(accountsPath, accounts);
+    });
 }
 
 // Ajouter un nouveau compte
+/**
+ * Route POST /accounts
+ * Correction : validation stricte via ValidationError, gestion centralisée des erreurs via handleError.
+ */
 app.post('/accounts', async (req, res) => {
     try {
         const newAccount = req.body;
-        // Validation simple
-        if (!newAccount.email || !newAccount.password) {
-            return res.status(400).json({ success: false, message: 'Email et mot de passe requis.' });
-        }
+        validateUserFields(newAccount);
 
         // Gestion du temps de session
         if (newAccount.sessionDuration) {
-            // sessionDuration format: "2h" ou "1.5h"
-            const hours = parseFloat(newAccount.sessionDuration.replace('h', ''));
-            if (!isNaN(hours) && hours > 0) {
-                newAccount.sessionEnd = Date.now() + hours * 60 * 60 * 1000;
+            const durationMs = parseDurationString(newAccount.sessionDuration);
+            if (!isNaN(durationMs) && durationMs > 0) {
+                newAccount.sessionEnd = calculateSessionEnd(Date.now(), durationMs);
+            } else {
+                throw new ValidationError('sessionDuration doit être un nombre positif suivi de "h".', { champ: 'sessionDuration' });
             }
         } else {
             newAccount.sessionEnd = null;
         }
 
+        if (typeof newAccount.isEnabled !== 'boolean') {
+            newAccount.isEnabled = true;
+        }
+
         const accounts = await readAccountsFile();
 
-        // Générer un ID unique (simple exemple, pourrait être amélioré)
         const newId = `account_${Date.now()}`;
         newAccount.id = newId;
 
@@ -208,30 +318,29 @@ app.post('/accounts', async (req, res) => {
         await writeAccountsFile(accounts);
 
         logger.info(`Nouveau compte ajouté: ${newAccount.email} (ID: ${newId})`);
-        // Retourne le compte ajouté (avec son nouvel ID)
         res.status(201).json({ success: true, account: newAccount });
     } catch (error) {
-        logger.error('Erreur lors de l\'ajout du compte:', error);
+        if (error instanceof ValidationError) {
+            logger.warn(`[Validation] ${error.message}`, error.details);
+            return res.status(400).json({ success: false, message: error.message, details: error.details });
+        }
+        handleError(error, logger);
         res.status(500).json({ success: false, message: 'Erreur serveur lors de l\'ajout.' });
     }
 });
 
 // Modifier un compte existant
+/**
+ * Route PUT /accounts/:id
+ * Correction : validation stricte via ValidationError, gestion centralisée des erreurs via handleError.
+ */
 app.put('/accounts/:id', async (req, res) => {
     try {
         const accountId = req.params.id;
         const updatedData = req.body;
-        // Ne pas permettre la modification de l'ID
         delete updatedData.id;
 
-        // Validation : n'exiger email et mot de passe que si on tente de les modifier
-        if (
-            (Object.prototype.hasOwnProperty.call(updatedData, 'email') && !updatedData.email) ||
-            (Object.prototype.hasOwnProperty.call(updatedData, 'password') && !updatedData.password)
-        ) {
-            return res.status(400).json({ success: false, message: 'Email ou mot de passe vide non autorisé.' });
-        }
-
+        validateUserFields(updatedData);
 
         const accounts = await readAccountsFile();
         const accountIndex = accounts.findIndex(acc => acc.id === accountId);
@@ -240,18 +349,20 @@ app.put('/accounts/:id', async (req, res) => {
             return res.status(404).json({ success: false, message: 'Compte non trouvé.' });
         }
 
-        // Fusionne les anciennes données avec les nouvelles
-        // Gestion du temps de session lors de la modification
         let merged = { ...accounts[accountIndex], ...updatedData };
         if (updatedData.sessionDuration) {
-            const hours = parseFloat(updatedData.sessionDuration.replace('h', ''));
-            if (!isNaN(hours) && hours > 0) {
-                merged.sessionEnd = Date.now() + hours * 60 * 60 * 1000;
+            const durationMs = parseDurationString(updatedData.sessionDuration);
+            if (!isNaN(durationMs) && durationMs > 0) {
+                merged.sessionEnd = calculateSessionEnd(Date.now(), durationMs);
+            } else {
+                merged.sessionEnd = null;
             }
         }
-        // Si sessionDuration supprimé, sessionEnd devient null
         if (updatedData.sessionDuration === "" || updatedData.sessionDuration === null) {
             merged.sessionEnd = null;
+        }
+        if (typeof updatedData.isEnabled === 'boolean') {
+            merged.isEnabled = updatedData.isEnabled;
         }
         accounts[accountIndex] = merged;
 
@@ -259,12 +370,20 @@ app.put('/accounts/:id', async (req, res) => {
         logger.info(`Compte modifié: ${accounts[accountIndex].email} (ID: ${accountId})`);
         res.json({ success: true, account: accounts[accountIndex] });
     } catch (error) {
-        logger.error(`Erreur lors de la modification du compte ${req.params.id}:`, error);
+        if (error instanceof ValidationError) {
+            logger.warn(`[Validation] ${error.message}`, error.details);
+            return res.status(400).json({ success: false, message: error.message, details: error.details });
+        }
+        handleError(error, logger);
         res.status(500).json({ success: false, message: 'Erreur serveur lors de la modification.' });
     }
 });
 
 // Supprimer un compte
+/**
+ * Route DELETE /accounts/:id
+ * Correction : gestion centralisée des erreurs via handleError.
+ */
 app.delete('/accounts/:id', async (req, res) => {
     try {
         const accountId = req.params.id;
@@ -280,7 +399,8 @@ app.delete('/accounts/:id', async (req, res) => {
         logger.info(`Compte supprimé (ID: ${accountId})`);
         res.json({ success: true, message: 'Compte supprimé.' });
     } catch (error) {
-        logger.error(`Erreur lors de la suppression du compte ${req.params.id}:`, error);
+        // Gestion centralisée des erreurs
+        handleError(error, logger);
         res.status(500).json({ success: false, message: 'Erreur serveur lors de la suppression.' });
     }
 });
@@ -301,12 +421,11 @@ function startServer() {
 
       // --- Chargement des temps de session persistants au démarrage ---
       try {
-        const data = await fs.readFile(sessionTimesPath, 'utf-8');
-        sessionTimes = JSON.parse(data);
-        logger.info(`sessionTimes chargé depuis ${sessionTimesPath}`);
+        sessionTimes = await readSessionTimes(sessionTimesPath);
+        logger.debug(`sessionTimes chargé depuis ${sessionTimesPath}`);
       } catch (error) {
         if (error.code === 'ENOENT') {
-          logger.info(`Fichier ${sessionTimesPath} non trouvé, initialisation de sessionTimes vide.`);
+          logger.debug(`Fichier ${sessionTimesPath} non trouvé, initialisation de sessionTimes vide.`);
           sessionTimes = {}; // Assure que sessionTimes est un objet vide si le fichier n'existe pas
         } else {
           logger.error(`Erreur lors du chargement de ${sessionTimesPath}:`, error);
@@ -315,60 +434,9 @@ function startServer() {
       }
 
       // --- Initialisation des sessions actives au démarrage ---
-      try {
-        logger.info('--- Début Initialisation des sessions actives au démarrage ---');
-        const allAccounts = await loadAccountsFromJSON();
-        logger.info(`Comptes chargés pour initialisation: ${allAccounts.length}`);
-        const activeAccountIds = await fs.readFile(activeAccountsPath, 'utf-8')
-          .then(data => JSON.parse(data))
-          .catch(error => {
-            if (error.code === 'ENOENT') {
-              logger.info('Fichier active_accounts.json non trouvé, aucun compte actif à initialiser.');
-              return []; // Fichier non trouvé, pas de comptes actifs
-            }
-            throw error;
-          });
-        logger.info(`IDs des comptes actifs chargés: ${activeAccountIds.join(', ')}`);
-
-        const now = Date.now();
-        allAccounts.forEach(account => {
-          logger.info(`Traitement du compte ${account.id}: sessionDuration=${account.sessionDuration}, sessionEnd=${account.sessionEnd}`);
-          // Vérifier si le compte est actif ET a une durée de session
-          if (activeAccountIds.includes(account.id) && account.sessionDuration) {
-            const hours = parseFloat(account.sessionDuration.replace('h', ''));
-            if (!isNaN(hours) && hours > 0) {
-              // Si sessionEnd n'est pas défini ou est dans le passé, le recalculer
-              if (account.sessionEnd === undefined || account.sessionEnd === null || Number(account.sessionEnd) <= now) {
-                 account.sessionEnd = now + hours * 60 * 60 * 1000;
-                 logger.info(`Initialisation de sessionEnd pour le compte actif ${account.id} à ${new Date(account.sessionEnd).toISOString()}`);
-              } else {
-                 // Si sessionEnd est déjà défini et dans le futur, s'assurer qu'il est un nombre
-                 account.sessionEnd = Number(account.sessionEnd);
-                 logger.info(`SessionEnd existant pour le compte actif ${account.id}: ${new Date(account.sessionEnd).toISOString()}`);
-              }
-              // Stocker le temps restant initial en mémoire
-              sessionTimes[account.id] = account.sessionEnd - now;
-              logger.info(`Temps restant initial en mémoire pour ${account.id}: ${sessionTimes[account.id]} ms`);
-            } else {
-               // Si le compte est actif mais n'a pas de durée de session valide, s'assurer que sessionEnd est null
-               account.sessionEnd = null;
-               if (sessionTimes[account.id]) delete sessionTimes[account.id]; // Retirer de la mémoire si présent
-               logger.info(`Compte actif ${account.id} sans sessionDuration valide, sessionEnd mis à null.`);
-            }
-          } else {
-             // Si le compte n'est pas actif, s'assurer que sessionEnd est null
-             account.sessionEnd = null;
-             if (sessionTimes[account.id]) delete sessionTimes[account.id]; // Retirer de la mémoire si présent
-             logger.info(`Compte ${account.id} non actif, sessionEnd mis à null.`);
-          }
-        }); 
-        
-        logger.info('--- Fin Initialisation des sessions actives ---');
-        resolve({ app, io, httpServer });
-      } catch (error) {
-        logger.error('Erreur lors de l\'initialisation des sessions actives:', error);
-        reject(error);
-      }
+      // Suppression de toute logique de réinitialisation des temps de session
+      // On ne touche plus à sessionTimes ici : la persistance est garantie uniquement par sessionTimes.json
+      resolve({ app, io, httpServer });
     }).on('error', reject);
   });
 }

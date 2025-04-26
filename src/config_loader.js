@@ -41,7 +41,7 @@ function validateBaseEnvVariables() {
  */
 async function loadAccountsFromJSON() {
     const accountsPath = path.resolve('config/accounts_config.json');
-    logger.info(`Chargement des comptes depuis ${accountsPath}...`);
+    logger.debug(`Chargement des comptes depuis ${accountsPath}...`);
     try {
         const data = await fs.readFile(accountsPath, 'utf-8');
         const accounts = JSON.parse(data);
@@ -54,7 +54,7 @@ async function loadAccountsFromJSON() {
         const processedAccounts = accounts.map(account => {
             // Validation simple (vérifier les champs essentiels)
             if (!account.id || !account.email || !account.password) {
-                logger.warn(`Compte invalide trouvé dans ${accountsPath}. Manque id, email ou password. Compte ignoré.`);
+                logger.error(`Compte invalide trouvé dans ${accountsPath}. Manque id, email ou password. Compte ignoré.`);
                 return null; // Ignorer ce compte invalide
             }
 
@@ -65,16 +65,16 @@ async function loadAccountsFromJSON() {
                     // Si sessionEnd n'est pas défini ou est dans le passé, le recalculer
                     if (account.sessionEnd === undefined || account.sessionEnd === null || Number(account.sessionEnd) <= now) {
                         account.sessionEnd = now + hours * 60 * 60 * 1000;
-                        logger.info(`Calcul de sessionEnd pour le compte ${account.id} lors du chargement.`);
+                        logger.debug(`Calcul de sessionEnd pour le compte ${account.id} lors du chargement.`);
                     } else {
                         // Si sessionEnd est déjà défini et dans le futur, s'assurer qu'il est un nombre
                         account.sessionEnd = Number(account.sessionEnd);
-                        logger.info(`Utilisation de sessionEnd existant pour le compte ${account.id}.`);
+                        logger.debug(`Utilisation de sessionEnd existant pour le compte ${account.id}.`);
                     }
                 } else {
                     // sessionDuration invalide, définir sessionEnd à null
                     account.sessionEnd = null;
-                    logger.warn(`sessionDuration invalide pour le compte ${account.id}: "${account.sessionDuration}". sessionEnd mis à null.`);
+                    logger.error(`sessionDuration invalide pour le compte ${account.id}: "${account.sessionDuration}". sessionEnd mis à null.`);
                 }
             } else {
                 // Pas de sessionDuration, définir sessionEnd à null
@@ -144,7 +144,7 @@ logger.info(`Utilisation du modèle OpenAI : ${currentConfig.OPENAI_MODEL}`);
  * @param {object} newValues Les nouvelles valeurs de configuration.
  */
 function updateConfig(newValues) {
-    logger.info('Tentative de mise à jour de la configuration...');
+    logger.debug('Tentative de mise à jour de la configuration...');
     let configChanged = false;
     const updatableKeys = [
         'OPENAI_MODEL',
@@ -164,13 +164,13 @@ function updateConfig(newValues) {
                 if (Number.isFinite(parsedValue) && parsedValue >= 0) { // Assure que c'est un nombre positif
                     value = parsedValue;
                 } else {
-                    logger.warn(`Valeur invalide pour ${key}: "${newValues[key]}". Ignorée.`);
+                    logger.error(`Valeur invalide pour ${key}: "${newValues[key]}". Ignorée.`);
                     continue; // Ignore la mise à jour pour cette clé
                 }
             }
 
             if (currentConfig[key] !== value) {
-                logger.info(`Mise à jour de ${key}: "${currentConfig[key]}" -> "${value}"`);
+                logger.debug(`Mise à jour de ${key}: "${currentConfig[key]}" -> "${value}"`);
                 currentConfig[key] = value;
                 configChanged = true;
             }
@@ -181,7 +181,7 @@ function updateConfig(newValues) {
         logger.info('Configuration mise à jour avec succès.');
         // TODO: Signaler aux parties du bot qui utilisent la config qu'elle a changé si nécessaire
     } else {
-        logger.info('Aucun changement détecté dans la configuration fournie.');
+        logger.debug('Aucun changement détecté dans la configuration fournie.');
     }
 }
 
