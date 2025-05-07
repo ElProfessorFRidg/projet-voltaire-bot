@@ -1,8 +1,9 @@
 {
-  "OPENAI_MODEL": "gpt-4o-mini",
+  "OPENAI_MODEL": "gpt-4.1-mini",
   "MIN_ACTION_DELAY": 500,
   "MAX_ACTION_DELAY": 1500,
   "MIN_TYPING_DELAY": 50,
   "MAX_TYPING_DELAY": 150,
-  "LOGIN_URL": "https://www.projet-voltaire.fr/voltaire/com.woonoz.gwt.woonoz.Voltaire/Voltaire.html?module=ORTHOGRAPHE"
+  "LOGIN_URL": "https://www.projet-voltaire.fr/voltaire/com.woonoz.gwt.woonoz.Voltaire/Voltaire.html?module=ORTHOGRAPHE",
+  "FAULT_PROBABILITY": 0.1
 }

@@ -63,3 +63,40 @@ export function validateUserFields(data) {
     throw new ValidationError('isEnabled doit être un booléen.', { champ: 'isEnabled' });
   }
 }
+/**
+ * Valide les options passées à initializeBrowserSession.
+ * Lance une ValidationError si une option est invalide.
+ * @param {object} options
+ */
+export function validateBrowserSessionOptions(options) {
+  if (options == null || typeof options !== 'object' || Array.isArray(options)) {
+    throw new ValidationError('Les options de session doivent être un objet non nul.', { champ: 'options', valeur: options });
+  }
+  // headless (optionnel, booléen)
+  if ('headless' in options && typeof options.headless !== 'boolean') {
+    throw new ValidationError('L’option headless doit être un booléen.', { champ: 'headless', valeur: options.headless });
+  }
+  // timeout (optionnel, number >=0 <=MAX_SAFE_INTEGER, non NaN)
+  if ('timeout' in options) {
+    const t = options.timeout;
+    if (typeof t !== 'number' || !Number.isFinite(t) || Number.isNaN(t) || t < 0 || t > Number.MAX_SAFE_INTEGER) {
+      throw new ValidationError('L’option timeout doit être un nombre >= 0 et <= Number.MAX_SAFE_INTEGER.', { champ: 'timeout', valeur: t });
+    }
+  }
+  // sessionDurationMs (optionnel, number >=0 <=MAX_SAFE_INTEGER, non NaN)
+  if ('sessionDurationMs' in options) {
+    const d = options.sessionDurationMs;
+    if (typeof d !== 'number' || !Number.isFinite(d) || Number.isNaN(d) || d < 0 || d > Number.MAX_SAFE_INTEGER) {
+      throw new ValidationError('L’option sessionDurationMs doit être un nombre >= 0 et <= Number.MAX_SAFE_INTEGER.', { champ: 'sessionDurationMs', valeur: d });
+    }
+  }
+  // Autres options numériques (timeouts, etc.)
+  for (const key of Object.keys(options)) {
+    if (/timeout/i.test(key) && typeof options[key] !== 'undefined') {
+      const v = options[key];
+      if (typeof v !== 'number' || !Number.isFinite(v) || Number.isNaN(v) || v < 0 || v > Number.MAX_SAFE_INTEGER) {
+        throw new ValidationError(`L’option ${key} doit être un nombre >= 0 et <= Number.MAX_SAFE_INTEGER.`, { champ: key, valeur: v });
+      }
+    }
+  }
+}

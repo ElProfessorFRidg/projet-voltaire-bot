@@ -1,15 +1,18 @@
 // 1. Importations
-import logger from './src/logger.js';
-import { initializeBrowserSession, closeBrowserSession, closeAllBrowserSessions, getActiveSessionIds } from './src/browser_manager.js';
+import getLogger from './src/logger.js';
+import { initializeBrowserSession, closeBrowserSession, closeAllBrowserSessions, getActiveSessionIds, restartBrowserSession, getSessionAbortSignal } from './src/browser_manager.js'; // Import restartBrowserSession et getSessionAbortSignal
 import { login } from './src/auth_handler.js';
 import { solveSingleExercise } from './src/solver_engine.js';
 import { solvePopup } from './src/popup_solver.js';
-import { config, loadAccountsFromJSON } from './src/config_loader.js'; // Importe la config et loadAccountsFromJSON
-import { startServer } from './src/server.js'; // Importe la fonction de démarrage du serveur
-import fs from 'fs/promises'; // Pour lire le fichier des comptes actifs
-import path from 'path'; // Pour gérer les chemins
-import selectors from './src/selectors.js'; // Correction : centralisation des sélecteurs popup
-// import { spawn } from 'child_process'; // Désactivé car non utilisé pour le redémarrage
+import { config, loadAccountsFromJSON } from './src/config_loader.js';
+import { startServer } from './src/server.js';
+import fs from 'fs/promises';
+import path from 'path';
+import selectors from './src/selectors.js';
+import { initOpenAIClient } from './src/openai_client.js';
+import { ElementNotFoundError } from './src/error_utils.js'; // Import ElementNotFoundError
+
+let logger;
 
 // Si Node < 18, décommenter la ligne suivante et installer node-fetch
 // import fetch from 'node-fetch';
@@ -74,16 +77,39 @@ async function checkAndSolvePopup(page, popupSelector, timeout, sessionId) {
         const isPopupVisible = await page.locator(popupSelector).isVisible({ timeout });
         if (isPopupVisible) {
             logger.info(`[${sessionId}] Popup d'entraînement intensif détecté. Lancement de solvePopup...`);
-            await solvePopup(page); // solvePopup pourrait aussi avoir besoin du sessionId pour log
-            logger.info(`[${sessionId}] solvePopup terminé.`);
-            return true;
+            try {
+                await solvePopup(page); // Can throw ElementNotFoundError
+                logger.info(`[${sessionId}] solvePopup terminé avec succès.`);
+                return true; // Popup was handled
+            } catch (popupError) {
+                if (popupError instanceof ElementNotFoundError) {
+                    logger.error(`[${sessionId}] [RESTART_TRIGGER] ElementNotFoundError caught during solvePopup: ${popupError.message}. Attempting browser restart.`); // ADDED LOG CONTEXT
+                    try {
+                        // Define the launch options used in runAccountSession
+                        const launchOptions = { headless: false }; // TODO: Make this dynamic if options change
+                        await restartBrowserSession(sessionId, launchOptions);
+                        logger.warn(`[${sessionId}] [RESTART_TRIGGER] Browser session restart initiated successfully after ElementNotFoundError in solvePopup.`); // ADDED LOG CONTEXT
+                        // Return false as the popup wasn't fully handled in this attempt, but restart was triggered.
+                        // The main loop will continue, potentially selecting the next exercise or retrying.
+                        return false;
+                    } catch (restartError) {
+                        logger.fatal(`[${sessionId}] [RESTART_TRIGGER] CRITICAL: Failed to restart browser session after ElementNotFoundError in solvePopup: ${restartError.message}`, restartError); // ADDED LOG CONTEXT
+                        // If restart fails, it's critical. Return false and let the main loop potentially fail later.
+                        return false;
+                    }
+                } else {
+                    // Handle other errors from solvePopup
+                    logger.error(`[${sessionId}] Erreur inattendue durant solvePopup: ${popupError.message}`, popupError);
+                    return false; // Indicate popup handling failed
+                }
+            }
         }
     } catch (error) {
-        // Ne log que si ce n'est pas une erreur de timeout standard
+        // Handle errors during the initial isVisible check
         if (!error.message.includes('Timeout') && !error.message.includes('waiting for selector')) {
-             logger.warn(`[${sessionId}] Erreur inattendue lors de la vérification du popup (${popupSelector}): ${error.message}`);
+             logger.warn(`[${sessionId}] Erreur lors de la détection initiale du popup (${popupSelector}): ${error.message}`);
         } else {
-             logger.debug(`[${sessionId}] Popup non détecté ou timeout (${popupSelector}).`);
+             logger.debug(`[${sessionId}] Popup non détecté ou timeout lors de la détection initiale (${popupSelector}).`);
         }
     }
     return false;
@@ -95,62 +121,92 @@ async function checkAndSolvePopup(page, popupSelector, timeout, sessionId) {
  * @param {string} sessionId Pour le logging
  * @returns {Promise<boolean>} true si un exercice a été cliqué, false sinon
  */
-async function selectNextExercise(page, sessionId) {
+async function selectNextExercise(page, sessionId, signal) {
     const nextExerciseCellSelector = `
         .validation-activity-cell.readyToRun,
         .activity-selector-cell.readyToRun,
         .activity-selector-cell.unit.orange,
-        .activity-selector-cell.inProgress, /* Selector for in-progress standard exercises */
-        .validation-activity-cell.inProgress /* Selector for in-progress validation exercises */
+        .activity-selector-cell.inProgress,
+        .validation-activity-cell.inProgress,
+        .activity-selector-cell.notStarted.nextIsStandard
     `;
     const launchButtonSelector = 'button.activity-selector-cell-launch-button, button.validation-activity-cell-launch-button';
 
     logger.debug(`[${sessionId}] Recherche du prochain exercice à lancer (Selector: ${nextExerciseCellSelector.replace(/\s+/g, ' ').trim()})...`);
 
-    try {
-        // Find the first VISIBLE element matching the selector
-        logger.debug(`[${sessionId}] Recherche de la première cellule cible VISIBLE...`);
-        const targetCell = page.locator(nextExerciseCellSelector).filter({ has: page.locator(':visible') }).first();
+    let retryCount = 0;
+    const maxRetries = 2;
+    retryLoop: while (retryCount <= maxRetries) {
+        try {
+            // Find the first VISIBLE element matching the selector
+            logger.debug(`[${sessionId}] Recherche de la première cellule cible VISIBLE...`);
+            const targetCell = page.locator(nextExerciseCellSelector).filter({ has: page.locator(':visible') }).first();
 
-        // Wait for the located visible element (optional, but good practice for stability)
-        logger.debug(`[${sessionId}] Attente de la cellule visible localisée...`);
-        await targetCell.waitFor({ state: 'visible', timeout: 15000 }); // Keep a timeout
+            // Wait for the located visible element (optional, but good practice for stability)
+            logger.debug(`[${sessionId}] Attente de la cellule visible localisée...`);
+            await Promise.race([
+                targetCell.waitFor({ state: 'visible', timeout: 15000 }),
+                new Promise((_, reject) => signal && signal.addEventListener('abort', () => reject(new Error('Aborted by signal')), { once: true }))
+            ]);
 
-        const cellHTML = await targetCell.innerHTML().catch(() => 'N/A'); // Get HTML for logging
-        logger.debug(`[${sessionId}] Cellule d'exercice visible trouvée. HTML (extrait): ${cellHTML.substring(0, 100)}...`);
+            const cellHTML = await targetCell.innerHTML().catch(() => 'N/A'); // Get HTML for logging
+            logger.debug(`[${sessionId}] Cellule d'exercice visible trouvée. HTML (extrait): ${cellHTML.substring(0, 100)}...`);
 
-        const launchButton = targetCell.locator(launchButtonSelector);
-        // Reduced timeout for button check as the cell is already confirmed visible
-        const isButtonVisible = await launchButton.isVisible({ timeout: 2000 });
-        logger.debug(`[${sessionId}] Vérification du bouton 'Lancer' (Selector: ${launchButtonSelector}). Visible: ${isButtonVisible}`);
+            const launchButton = targetCell.locator(launchButtonSelector);
+            // Reduced timeout for button check as the cell is already confirmed visible
+            const isButtonVisible = await Promise.race([
+                launchButton.isVisible({ timeout: 2000 }),
+                new Promise((_, reject) => signal && signal.addEventListener('abort', () => reject(new Error('Aborted by signal')), { once: true }))
+            ]);
+            logger.debug(`[${sessionId}] Vérification du bouton 'Lancer' (Selector: ${launchButtonSelector}). Visible: ${isButtonVisible}`);
 
-        if (isButtonVisible) {
-            logger.debug(`[${sessionId}] Bouton "Lancer" trouvé et visible. Clic sur le bouton...`);
-            await launchButton.click({ timeout: 5000 });
-        } else {
-            // If the button isn't there or visible quickly, click the cell itself
-            logger.debug(`[${sessionId}] Bouton "Lancer" non visible rapidement. Clic sur la cellule principale...`);
-            await targetCell.click({ timeout: 5000 });
-        }
-        logger.debug(`[${sessionId}] Clic effectué sur l'exercice/bouton.`);
-        return true;
-    } catch (error) {
-        // ... existing error handling ...
-        if (error.name === 'TimeoutError') {
-            // Log specific timeout details
-            if (error.message.includes('waitFor') || error.message.includes('filter')) { // Updated check
-                 logger.debug(`[${sessionId}] Timeout: Aucun exercice VISIBLE correspondant aux sélecteurs n'a été trouvé dans les délais.`);
-            } else if (error.message.includes('click')) {
-                 logger.warn(`[${sessionId}] Timeout lors du clic sur l'élément trouvé. L'élément est peut-être devenu non interactif.`);
+            if (isButtonVisible) {
+                logger.debug(`[${sessionId}] Bouton "Lancer" trouvé et visible. Clic sur le bouton...`);
+                await Promise.race([
+                    launchButton.click({ timeout: 5000 }),
+                    new Promise((_, reject) => signal && signal.addEventListener('abort', () => reject(new Error('Aborted by signal')), { once: true }))
+                ]);
             } else {
-                 logger.warn(`[${sessionId}] TimeoutError lors de la sélection/clic sur l'exercice: ${error.message}`);
+                // If the button isn't there or visible quickly, click the cell itself
+                logger.debug(`[${sessionId}] Bouton "Lancer" non visible rapidement. Clic sur la cellule principale...`);
+                await Promise.race([
+                    targetCell.click({ timeout: 5000 }),
+                    new Promise((_, reject) => signal && signal.addEventListener('abort', () => reject(new Error('Aborted by signal')), { once: true }))
+                ]);
             }
-        } else {
-            logger.error(`[${sessionId}] Erreur inattendue lors de la sélection/clic sur l'exercice: ${error.message}`, error.stack);
+            logger.debug(`[${sessionId}] Clic effectué sur l'exercice/bouton.`);
+            return true;
+        } catch (error) {
+            // Gestion du retry sur contexte fermé ou signal aborté
+            if (
+                error.message &&
+                (error.message.includes('has been closed') ||
+                 error.message.includes('Target page, context or browser has been closed') ||
+                 error.message.includes('Aborted by signal'))
+            ) {
+                logger.warn(`[${sessionId}] Erreur de contexte fermé ou annulation détectée dans selectNextExercise: ${error.message}. Retry #${retryCount + 1}`);
+                if (retryCount < maxRetries) {
+                    retryCount++;
+                    await new Promise(res => setTimeout(res, 1000 * retryCount));
+                    continue retryLoop;
+                }
+            }
+            if (error.name === 'TimeoutError') {
+                // Log specific timeout details
+                if (error.message.includes('waitFor') || error.message.includes('filter')) { // Updated check
+                     logger.debug(`[${sessionId}] Timeout: Aucun exercice VISIBLE correspondant aux sélecteurs n'a été trouvé dans les délais.`);
+                } else if (error.message.includes('click')) {
+                     logger.warn(`[${sessionId}] Timeout lors du clic sur l'élément trouvé. L'élément est peut-être devenu non interactif.`);
+                } else {
+                     logger.warn(`[${sessionId}] TimeoutError lors de la sélection/clic sur l'exercice: ${error.message}`);
+                }
+            } else {
+                logger.error(`[${sessionId}] Erreur inattendue lors de la sélection/clic sur l'exercice: ${error.message}`, error.stack);
+            }
+            return false;
         }
-        // ... existing screenshot logic ...
-        return false;
     }
+    return false;
 }
 
 // --- Logique spécifique à une session ---
@@ -237,7 +293,11 @@ async function runAccountSession(account) {
         logger.debug(`[${sessionId}] Initialisation du navigateur...`);
         // Utilise les options de config pour headless, etc.
         sessionData = await initializeBrowserSession(sessionId, { headless: false }); // TODO: Rendre headless configurable
-        const { page } = sessionData;
+        let { page } = sessionData;
+        if (!page || typeof page.goto !== 'function') {
+            logger.error(`[${sessionId}] Échec critique : l’objet page retourné n’est pas valide. Arrêt de la session.`);
+            throw new Error(`[${sessionId}] L’objet page retourné par initializeBrowserSession n’est pas valide.`);
+        }
         logger.debug(`[${sessionId}] Navigateur initialisé.`);
 
         logger.debug(`[${sessionId}] Tentative de connexion...`);
@@ -288,7 +348,9 @@ async function runAccountSession(account) {
             let exerciseSelected = false;
             try {
                 logger.debug(`[${sessionId}] Appel de selectNextExercise.`);
-                exerciseSelected = await selectNextExercise(page, sessionId); // Existing call
+                // Passage du signal d'annulation à selectNextExercise
+                const signal = getSessionAbortSignal(sessionId);
+                exerciseSelected = await selectNextExercise(page, sessionId, signal);
                 logger.debug(`[${sessionId}] Retour de selectNextExercise: ${exerciseSelected}`);
                 if (exerciseSelected) {
                     logger.debug(`[${sessionId}] Exercice sélectionné avec succès.`);
@@ -340,32 +402,118 @@ async function runAccountSession(account) {
                     await checkAndSolvePopup(page, popupSelector, popupCheckTimeout, sessionId);
 
                      if (!page || page.isClosed()) { // Vérifier après le popup
-                        logger.error(`[${sessionId}] La page est fermée après vérif popup dans boucle interne. Arrêt.`);
-                        break mainLoop;
+                        logger.warn(`[${sessionId}] [RESTART_TRIGGER] La page est fermée après vérif popup dans boucle interne. Tentative de redémarrage...`);
+                        try {
+                            await closeBrowserSession(sessionId);
+                            await new Promise(res => setTimeout(res, 2000));
+                            const launchOptions = { headless: false };
+                            sessionData = await initializeBrowserSession(sessionId, launchOptions);
+                            page = sessionData.page;
+                            if (!page || typeof page.goto !== 'function') {
+                                logger.error(`[${sessionId}] [RESTART_HANDLER] CRITICAL FAILURE: Invalid page object after restart (detected after popup check in inner loop). Stopping session.`);
+                                break mainLoop;
+                            }
+                            const loginResult = await login(page, account.email, account.password);
+                            if (!loginResult.success) {
+                                logger.error(`[${sessionId}] [RESTART_HANDLER] Login failed after restart (detected after popup check in inner loop): ${loginResult.error || 'Unknown reason'}. Stopping session.`);
+                                break mainLoop;
+                            }
+                            logger.info(`[${sessionId}] [RESTART_HANDLER] Session redémarrée avec succès (détecté après popup check). Continuation...`);
+                            continue mainLoop;
+                        } catch (restartError) {
+                            logger.fatal(`[${sessionId}] [RESTART_HANDLER] CRITICAL: Échec du processus de redémarrage (détecté après popup check): ${restartError.message}`, restartError);
+                            break mainLoop;
+                        }
                     }
-
                     // Résolution de l'étape
-                    logger.debug(`[${sessionId}] Lancement de solveSingleExercise...`);
-                    const solveResult = await solveSingleExercise(page, sessionId); // Passe sessionId pour logging interne
+                    logger.debug(`[${sessionId}] Attente de la présence du div .sentence avant résolution...`);
+                    try {
+                        // Encapsulation de l'attente de .sentence
+                        try {
+                            await page.waitForSelector(selectors.sentence, { timeout: 10000 });
+                            logger.debug(`[${sessionId}] Le div .sentence est présent, lancement de solveSingleExercise...`);
+                        } catch (waitErr) {
+                            // Interception spécifique du timeout pour .sentence DANS LA BOUCLE PRINCIPALE
+                            logger.error(`[${sessionId}] Erreur interceptée dans la boucle principale lors de l'attente de .sentence: Name=${waitErr.name}, Message=${waitErr.message}`, waitErr);
+                            if (waitErr.message && waitErr.message.includes('.sentence') && /Timeout|exceeded/i.test(waitErr.message)) {
+                                logger.warn(`[${sessionId}] Timeout détecté pour .sentence dans la boucle principale. Tentative de redémarrage du navigateur...`);
+                                try {
+                                    // Utiliser les mêmes options que lors de l'initialisation
+                                    const launchOptions = { headless: false }; // TODO: Rendre dynamique si nécessaire
+                                    await restartBrowserSession(sessionId, launchOptions);
+                                    logger.info(`[${sessionId}] Redémarrage du navigateur initié avec succès après timeout sur .sentence.`);
+                                    // Après redémarrage, on relance la boucle principale pour retenter la connexion/sélection
+                                    continue mainLoop;
+                                } catch (restartError) {
+                                    logger.fatal(`[${sessionId}] CRITICAL: Échec du redémarrage du navigateur après timeout sur .sentence: ${restartError.message}`, restartError);
+                                    // Si le redémarrage échoue, on arrête la boucle pour ce compte
+                                    break mainLoop;
+                                }
+                            } else {
+                                // Autres erreurs lors de l'attente de .sentence
+                                logger.error(`[${sessionId}] Erreur inattendue lors de l'attente de .sentence (non-timeout): ${waitErr.message}`);
+                                // On pourrait choisir de redémarrer aussi ou juste arrêter
+                                break mainLoop; // Arrêter en cas d'autre erreur d'attente
+                            }
+                        }
 
-                    // Gérer le redémarrage (pour l'instant, arrête juste la session)
-                    if (solveResult.restartBrowser) {
-                        logger.error(`[${sessionId}] Redémarrage demandé par solveSingleExercise. Arrêt de la session.`);
-                        break mainLoop;
+                        // Si l'attente réussit, on continue avec la résolution
+                        const solveResult = await solveSingleExercise(page, sessionId); // Passe sessionId pour logging interne
+
+                        // Gérer le redémarrage demandé par solveSingleExercise (pour d'autres erreurs)
+                        if (solveResult.restartBrowser) {
+                            logger.warn(`[${sessionId}] [RESTART_HANDLER] Restart requested by solveSingleExercise (other reason). Closing and relaunching session...`);
+                            // ... (le reste de la logique de redémarrage DÉJÀ PRÉSENTE reste ici) ...
+                            try {
+                                logger.debug(`[${sessionId}] [RESTART_HANDLER] Closing session...`);
+                                await closeBrowserSession(sessionId);
+                                logger.debug(`[${sessionId}] [RESTART_HANDLER] Session closed. Waiting 2s...`);
+                                await new Promise(res => setTimeout(res, 2000));
+                                logger.debug(`[${sessionId}] [RESTART_HANDLER] Initializing new session...`);
+                                const launchOptions = { headless: false }; // TODO: Configurable headless
+                                sessionData = await initializeBrowserSession(sessionId, launchOptions);
+                                page = sessionData.page;
+                                if (!page || typeof page.goto !== 'function') {
+                                    logger.error(`[${sessionId}] [RESTART_HANDLER] CRITICAL FAILURE: Invalid page object after restart. Stopping session.`);
+                                    throw new Error(`[${sessionId}] Invalid page object after restart.`);
+                                }
+                                logger.debug(`[${sessionId}] [RESTART_HANDLER] New session initialized. Attempting login...`);
+                                const loginResult = await login(page, account.email, account.password);
+                                if (!loginResult.success) {
+                                    logger.error(`[${sessionId}] [RESTART_HANDLER] Login failed after restart: ${loginResult.error || 'Unknown reason'}. Stopping session.`);
+                                    break mainLoop;
+                                }
+                                logger.info(`[${sessionId}] [RESTART_HANDLER] Browser session successfully restarted and logged in.`);
+                                logger.debug(`[${sessionId}] [RESTART_HANDLER] Continuing main loop...`);
+                                continue mainLoop;
+                            } catch (restartProcessError) {
+                                logger.error(`[${sessionId}] [RESTART_HANDLER] Error during the restart process (close/init/login): ${restartProcessError.message}`, restartProcessError);
+                                break mainLoop;
+                            }
+                        }
+
+                        // Gérer les autres résultats de solveSingleExercise
+                        if (!solveResult.success) {
+                            logger.warn(`[${sessionId}] Échec résolution étape: ${solveResult.error || 'Erreur inconnue'}. Retour sélection.`);
+                            break innerLoop;
+                        }
+
+                        if (solveResult.exerciseComplete) {
+                            logger.debug(`[${sessionId}] Exercice terminé.`);
+                            break innerLoop;
+                        }
+
+                        logger.debug(`[${sessionId}] Étape résolue. Passage à la suivante...`);
+                        await page.waitForTimeout(500 + Math.random() * 500); // Pause
+
+                    } catch (error) {
+                        // Ce catch intercepte les erreurs DANS solveSingleExercise ou après,
+                        // mais AVANT la fin de la boucle interne.
+                        // Le redémarrage spécifique au timeout de .sentence est géré plus haut.
+                        logger.error(`[${sessionId}] Erreur inattendue dans la boucle interne après l'attente de .sentence: ${error.message}`, error.stack);
+                        // On pourrait envisager un redémarrage ici aussi pour les erreurs graves
+                        break mainLoop; // Arrêter la boucle principale en cas d'erreur grave ici
                     }
-
-                    if (!solveResult.success) {
-                        logger.warn(`[${sessionId}] Échec résolution étape: ${solveResult.error || 'Erreur inconnue'}. Retour sélection.`);
-                        break innerLoop; // Retourne à la sélection d'exercice
-                    }
-
-                    if (solveResult.exerciseComplete) {
-                        logger.debug(`[${sessionId}] Exercice terminé.`);
-                        break innerLoop; // Cherche le prochain exercice
-                    }
-
-                    logger.debug(`[${sessionId}] Étape résolue. Passage à la suivante...`);
-                    await page.waitForTimeout(500 + Math.random() * 500); // Pause
                 } // Fin innerLoop
             } else {
                  logger.debug(`[${sessionId}] Saut de la boucle de résolution car aucun exercice n'a été sélectionné.`);
@@ -431,6 +579,7 @@ async function startAllSessions() {
         allAccounts = await loadAccountsFromJSON();
 
         const now = Date.now();
+
         for (const account of allAccounts) {
             const st = sessionTimes[account.id];
             let remaining = null;
@@ -578,7 +727,12 @@ process.on('SIGTERM', () => gracefulShutdown('SIGTERM')); // Arrêt système
 
 // --- Exécution ---
 async function main() {
-    await startServer(); // Démarre le serveur web
+    logger = await getLogger();
+    await initOpenAIClient();
+    // Démarre le serveur web et récupère le port effectif
+    const { port: actualPort } = await startServer();
+    logger.info(`Serveur web démarré sur le port ${actualPort}`); // Log dynamique
+
     // Si MODE=server, ne pas lancer le bot
     if (process.env.MODE === "server") {
         logger.info("MODE=server : seul le serveur web est lancé.");
@@ -586,5 +740,4 @@ async function main() {
     }
     startAllSessions(); // Démarre les sessions du bot
 }
-
 main();

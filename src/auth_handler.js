@@ -1,8 +1,15 @@
+/**
+ * Ce module utilise l’API asynchrone du logger.
+ * Pour chaque fonction asynchrone ou callback, obtenir l’instance du logger via :
+ *   const logger = await getLogger();
+ * avant chaque utilisation (info, error, warn, debug, etc.).
+ * Voir ./logger.js pour l’implémentation.
+ */
 // src/auth_handler.js
 import { config } from '../src/config_loader.js';
 const { MIN_ACTION_DELAY, MAX_ACTION_DELAY, MIN_TYPING_DELAY, MAX_TYPING_DELAY, LOGIN_URL } = config;
 import { randomDelay, getRandomInt } from '../src/human_simulator.js';
-import logger from './logger.js';
+import getLogger from './logger.js';
 
 /**
  * Gère la connexion au Projet Voltaire en simulant un comportement humain pour un compte spécifique.
@@ -12,6 +19,7 @@ import logger from './logger.js';
  * @returns {Promise<{success: boolean, error?: string}>}
  */
 export async function login(page, email, password) {
+  const logger = await getLogger();
   // Les identifiants sont maintenant passés en arguments
 
   // Sélecteurs pour les champs du formulaire de connexion

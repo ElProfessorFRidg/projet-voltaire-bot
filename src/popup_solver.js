@@ -2,7 +2,8 @@ import logger from './logger.js';
 import { getCorrection } from './openai_client.js';
 import { randomDelay } from './human_simulator.js';
 import { config } from './config_loader.js';
-import selectors from './selectors.js'; // Correction : externalisation des sélecteurs
+import selectors from './selectors.js';
+import { ElementNotFoundError } from './error_utils.js'; // Import the custom error
  
 const MIN_ACTION_DELAY = config.MIN_ACTION_DELAY;
 const MAX_ACTION_DELAY = config.MAX_ACTION_DELAY;
@@ -209,7 +210,19 @@ export async function solvePopup(page) {
                         logger.error(`[solvePopup V3 ${questionLogId}] Bouton "${buttonLabel}" non cliquable au moment prévu.`);
                     }
                 } catch (error) {
-                    logger.error(`[solvePopup V3 ${questionLogId}] Erreur traitement question: ${error.message}`);
+                    // Check if the error is specifically about the sentence element not being found
+                    if (error.message && (error.message.includes('textContent') || error.message.includes('locator')) && error.message.includes(selectors.sentence)) {
+                         const currentUrl = page.url();
+                         logger.error(
+                            `ElementNotFoundError: Failed to find or get text content for selector '${selectors.sentence}' in popup on page ${currentUrl}. Triggering restart mechanism.`,
+                            error
+                         );
+                         // Throw the specific error for the caller to handle
+                         throw new ElementNotFoundError(selectors.sentence, currentUrl, error);
+                    } else {
+                        // Log other errors during question processing
+                        logger.error(`[solvePopup V3 ${questionLogId}] Erreur traitement question: ${error.message}`, error);
+                    }
                 }
             } else {
                 // logger.debug(`[solvePopup V3 Iter ${iteration}] Aucune question active trouvée. Attente...`);

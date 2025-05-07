@@ -46,4 +46,5 @@ export async function randomDelay(minMs, maxMs) {
   }
   const duration = getRandomInt(minMs, maxMs);
   await delay(duration);
+  return duration;
 }

@@ -261,3 +261,36 @@ body.dark-mode .toast-notification.error {
   background: var(--color-primary);
   color: #ffe;
 }
+/* --- Styles pour l'avertissement de désynchronisation d'horloge --- */
+.warning-banner {
+    padding: 10px 15px;
+    margin-bottom: 15px;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    text-align: center;
+    font-weight: bold;
+}
+
+.warning-banner.warning {
+    color: #8a6d3b;
+    background-color: #fcf8e3;
+    border-color: #faebcc;
+}
+
+.warning-banner.blocking {
+    color: #a94442;
+    background-color: #f2dede;
+    border-color: #ebccd1;
+    /* Styles supplémentaires pour indiquer un blocage plus sévère si nécessaire */
+    /* Par exemple, une icône, une bordure plus épaisse, etc. */
+}
+
+/* Style pour désactiver visuellement les éléments lors du blocage */
+.session-blocked *:not(#time-skew-warning):not(body):not(html) {
+    opacity: 0.5;
+    pointer-events: none; /* Empêche les interactions */
+}
+#time-skew-warning { /* S'assurer que le message reste interactif si besoin */
+    opacity: 1;
+    pointer-events: auto;
+}

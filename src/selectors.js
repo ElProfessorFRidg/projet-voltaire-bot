@@ -26,7 +26,11 @@ const selectors = {
   exerciseTypeIndicator: '.exercise-type-indicator',
   choiceOptions: '.choice-option input[type="radio"]',
   choiceLabels: '.choice-option label',
-  ruleIdentifier: '.rule-id'
+  ruleIdentifier: '.rule-id',
+
+  // Sélecteurs pour l'état des exercices dans une liste/grille
+  activityInProgress: '.activity-selector-cell.inProgress', // Pour les exercices standards en cours
+  validationActivityInProgress: '.validation-activity-cell.inProgress' // Pour les exercices de validation en cours
 };
 
 export default selectors;

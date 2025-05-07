@@ -52,7 +52,33 @@ class Notifications {
       this.socket.emit('notification_read', { id });
     }
   }
+  // Méthode statique pour compatibilité ES module : Notifications.show(...)
+  static show(message) {
+    // Utilisation de l’API Notification si disponible, sinon fallback alert
+    if (typeof window !== 'undefined' && "Notification" in window) {
+      if (Notification.permission === "granted") {
+        new Notification(message);
+      } else if (Notification.permission !== "denied") {
+        Notification.requestPermission().then(permission => {
+          if (permission === "granted") {
+            new Notification(message);
+          } else {
+            alert(message);
+          }
+        });
+      } else {
+        alert(message);
+      }
+    } else {
+      alert(message);
+    }
+  }
+}
+ 
+// Expose la classe Notifications globalement
+if (typeof window !== 'undefined') {
+  window.Notifications = Notifications;
 }
 
-// Expose la classe Notifications globalement
-window.Notifications = Notifications;
+// Export ES module par défaut pour import Notifications from './notifications.js'
+export default Notifications;

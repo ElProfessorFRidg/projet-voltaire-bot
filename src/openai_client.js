@@ -1,21 +1,35 @@
 import { OpenAI } from 'openai';
 import { config } from './config_loader.js';
-import logger from './logger.js';
+import getLogger from './logger.js'; // ⚠️ Le logger est désormais asynchrone : utilisez const logger = await getLogger() avant chaque usage.
 import { JSDOM } from 'jsdom';
+import { closeBrowserSession } from './browser_manager.js';
 
+/**
+ * Initialisation asynchrone du client OpenAI et du logger.
+ * Le logger doit être obtenu via await getLogger() à chaque utilisation.
+ * Voir la documentation dans src/logger.js pour plus de détails.
+ */
 const OPENAI_API_KEY = config.OPENAI_API_KEY;
 const OPENAI_MODEL = config.OPENAI_MODEL;
 
 let openai = null;
-try {
-  if (!OPENAI_API_KEY) {
-    throw new Error("La clé API OpenAI (OPENAI_API_KEY) n'est pas définie dans la configuration.");
+
+/**
+ * Initialise le client OpenAI et log l’état d’initialisation.
+ * À appeler avant toute utilisation des fonctions exportées.
+ */
+export async function initOpenAIClient() {
+  const logger = await getLogger();
+  try {
+    if (!OPENAI_API_KEY) {
+      throw new Error("La clé API OpenAI (OPENAI_API_KEY) n'est pas définie dans la configuration.");
+    }
+    openai = new OpenAI({ apiKey: OPENAI_API_KEY });
+    logger.info(`Client OpenAI initialisé avec le modèle : ${OPENAI_MODEL}`);
+  } catch (error) {
+    logger.error("Erreur lors de l'initialisation du client OpenAI :", error);
+    openai = null;
   }
-  openai = new OpenAI({ apiKey: OPENAI_API_KEY });
-  logger.info(`Client OpenAI initialisé avec le modèle : ${OPENAI_MODEL}`);
-} catch (error) {
-  logger.error("Erreur lors de l'initialisation du client OpenAI :", error);
-  openai = null;
 }
 
 /**
@@ -50,6 +64,7 @@ function tryParseJson(jsonString) {
  * @returns {Promise<object>} Une promesse qui résout avec l'objet JSON de la réponse ou un objet d'erreur.
  */
 export async function getCorrection(promptContent) {
+  const logger = await getLogger();
   if (!openai) {
     logger.error("Le client OpenAI n'a pas été initialisé correctement. Impossible d'envoyer le prompt.");
     return { success: false, error: "Client OpenAI non initialisé." };
@@ -63,7 +78,7 @@ export async function getCorrection(promptContent) {
 
   logger.debug(`Envoi du prompt à OpenAI (${OPENAI_MODEL}): ${promptContent}`);
 
-  // Choix aléatoire du modèle : 50% de chance d'utiliser le modèle configuré, sinon gpt-4.1-mini
+  // Choix aléatoire du modèle : 50% de chance d'utiliser le modèle configuré, sinon gpt-4.1
   const randomModel = Math.random() < 0.5 ? OPENAI_MODEL : 'gpt-4.1';
   logger.debug(`Modèle utilisé pour cette requête : ${randomModel}`);
 
@@ -133,6 +148,7 @@ export async function getCorrection(promptContent) {
  * @returns {Promise<{success: boolean, suggestion?: string, error?: string}>}
  */
 export async function getErrorReportSuggestion(errorMessage, currentUrl, sessionId, htmlSource) {
+  const logger = await getLogger();
   if (!openai) {
     logger.error(`[${sessionId}] [ErrorAssist] Le client OpenAI n'est pas initialisé.`);
     return { success: false, error: "Client OpenAI non initialisé." };
@@ -158,7 +174,8 @@ Réponds UNIQUEMENT par un objet JSON strictement de la forme : { "action": "cl
 `;
 
   // 3. Validation du sélecteur côté Node (syntaxe, unicité, cliquabilité)
-  function validateSelector(selector, html) {
+  async function validateSelector(selector, html) {
+    const logger = await getLogger();
     if (!selector || typeof selector !== 'string') return false;
     if (selector === 'AUCUNE_ACTION') return true;
 
@@ -270,11 +287,13 @@ Réponds UNIQUEMENT par un objet JSON strictement de la forme : { "action": "cl
       
       // Validation stricte de la structure
       if (action === "no_action") {
-        logger.info(`[${sessionId}] [ErrorAssist] Aucune action suggérée.`);
-        return { success: true, suggestion: { action: "no_action" } };
+        logger.info(`[${sessionId}] [ErrorAssist] Aucune action suggérée à la tentative ${attempt}.`);
+        // On ne retourne plus ici, on continue la boucle pour réessayer jusqu'à maxTries
+        lastError = 'Aucune action suggérée ("no_action")';
+        continue;
       }
       
-      if (action === "click_selector" && typeof selector === "string" && selector.trim() && validateSelector(selector, html)) {
+      if (action === "click_selector" && typeof selector === "string" && selector.trim() && await validateSelector(selector, html)) {
         logger.info(`[${sessionId}] [ErrorAssist] Sélecteur validé: "${selector}"`);
         return { success: true, suggestion: { action: "click_selector", value: selector } };
       } else {
@@ -284,6 +303,12 @@ Réponds UNIQUEMENT par un objet JSON strictement de la forme : { "action": "cl
     }
   }
 
-  logger.error(`[${sessionId}] [ErrorAssist] Échec après ${maxTries} tentatives. Dernier sélecteur: "${lastSelector}"`);
+  logger.error(`[${sessionId}] [ErrorAssist] Échec après ${maxTries} tentatives. Dernière action: "${lastSelector}"`);
+  // Si la dernière action était "no_action", on ferme et relance le navigateur
+  if (lastError && lastError.includes('Aucune action suggérée')) {
+    logger.warn(`[${sessionId}] [ErrorAssist] 3x "no_action" consécutifs : fermeture et relance du navigateur.`);
+    await closeBrowserSession(sessionId);
+    return { success: true, suggestion: { action: "restart_browser" } };
+  }
   return { success: false, error: `Aucun sélecteur valide trouvé après ${maxTries} essais. Dernier: "${lastSelector}"` };
 }

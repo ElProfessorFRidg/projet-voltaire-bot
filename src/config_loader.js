@@ -1,5 +1,10 @@
 import 'dotenv/config'; // Charge les variables d'environnement depuis le fichier .env
-import logger from './logger.js'; // Assurez-vous que le logger est disponible
+/**
+ * ⚠️ Changement d’API logger : le module logger.js exporte désormais une fonction asynchrone getLogger().
+ * Il faut obtenir l’instance du logger via : const logger = await getLogger();
+ * Voir src/logger.js pour plus de détails.
+ */
+import getLogger from './logger.js';
 import fs from 'fs/promises';
 import path from 'path';
 
@@ -10,7 +15,8 @@ const DEFAULTS = {
   MAX_ACTION_DELAY: 1500,
   MIN_TYPING_DELAY: 50,
   MAX_TYPING_DELAY: 150,
-  LOGIN_URL: 'https://compte.groupe-voltaire.fr/login'
+  LOGIN_URL: 'https://compte.groupe-voltaire.fr/login',
+  FAULT_PROBABILITY: 0.1
 };
 const WEB_CONFIG_PATH = path.resolve('config/web_config.json');
 
@@ -42,6 +48,7 @@ function validateBaseEnvVariables() {
  */
 async function loadAccountsFromJSON() {
     const accountsPath = path.resolve('config/accounts_config.json');
+    const logger = await getLogger();
     logger.debug(`Chargement des comptes depuis ${accountsPath}...`);
     try {
         const data = await fs.readFile(accountsPath, 'utf-8');
@@ -108,6 +115,23 @@ async function loadAccountsFromJSON() {
  * @param {number} defaultValue
  * @returns {number}
  */
+/**
+ * Parse un float ou retourne la valeur par défaut.
+ * @param {string|undefined} value
+ * @param {number} defaultValue
+ * @returns {number}
+ */
+function parseFloatOrDefault(value, defaultValue) {
+  const parsed = parseFloat(value);
+  return Number.isFinite(parsed) ? parsed : defaultValue;
+}
+
+/**
+ * Parse un int ou retourne la valeur par défaut.
+ * @param {string|undefined} value
+ * @param {number} defaultValue
+ * @returns {number}
+ */
 function parseIntOrDefault(value, defaultValue) {
   const parsed = parseInt(value, 10);
   return Number.isFinite(parsed) ? parsed : defaultValue;
@@ -134,7 +158,8 @@ let currentConfig = {
   MAX_TYPING_DELAY: parseIntOrDefault(process.env.MAX_TYPING_DELAY, DEFAULTS.MAX_TYPING_DELAY),
   LOGIN_URL: process.env.VOLTAIRE_LOGIN_URL && process.env.VOLTAIRE_LOGIN_URL.trim() !== ''
     ? process.env.VOLTAIRE_LOGIN_URL
-    : DEFAULTS.LOGIN_URL
+    : DEFAULTS.LOGIN_URL,
+  FAULT_PROBABILITY: parseFloatOrDefault(process.env.FAULT_PROBABILITY, DEFAULTS.FAULT_PROBABILITY)
 };
 
 /**
@@ -153,18 +178,22 @@ async function loadWebConfig() {
       'MAX_ACTION_DELAY',
       'MIN_TYPING_DELAY',
       'MAX_TYPING_DELAY',
-      'LOGIN_URL'
+      'LOGIN_URL',
+      'FAULT_PROBABILITY'
     ];
     for (const key of updatableKeys) {
       if (webConfig.hasOwnProperty(key)) {
         currentConfig[key] = webConfig[key];
       }
     }
+    const logger = await getLogger();
     logger.info('Configuration web chargée depuis web_config.json.');
   } catch (error) {
     if (error.code === 'ENOENT') {
+      const logger = await getLogger();
       logger.warn('web_config.json non trouvé, utilisation de la configuration par défaut ou .env.');
     } else {
+      const logger = await getLogger();
       logger.error('Erreur lors du chargement de web_config.json :', error);
     }
   }
@@ -173,14 +202,19 @@ async function loadWebConfig() {
 // Charger la config web au démarrage (avant export)
 await loadWebConfig();
 
-logger.info('Configuration de base chargée et validée.');
-logger.info(`Utilisation du modèle OpenAI : ${currentConfig.OPENAI_MODEL}`);
+{
+    // Initialisation du logger pour les logs de démarrage (top-level await)
+    const logger = await getLogger();
+    logger.info('Configuration de base chargée et validée.');
+    logger.info(`Utilisation du modèle OpenAI : ${currentConfig.OPENAI_MODEL}`);
+}
 
 /**
  * Met à jour la configuration avec de nouvelles valeurs.
  * @param {object} newValues Les nouvelles valeurs de configuration.
  */
 async function updateConfig(newValues) {
+    const logger = await getLogger();
     logger.debug('Tentative de mise à jour de la configuration...');
     let configChanged = false;
     const updatableKeys = [
@@ -189,7 +223,8 @@ async function updateConfig(newValues) {
         'MAX_ACTION_DELAY',
         'MIN_TYPING_DELAY',
         'MAX_TYPING_DELAY',
-        'LOGIN_URL'
+        'LOGIN_URL',
+        'FAULT_PROBABILITY'
     ];
     
     for (const key of updatableKeys) {
